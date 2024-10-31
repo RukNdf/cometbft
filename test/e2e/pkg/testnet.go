@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/csv"
 	"errors"
@@ -9,12 +8,10 @@ import (
 	"io"
 	"math/rand"
 	"net"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
 	_ "embed"
@@ -321,17 +318,21 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 	}
 
 	// Set up genesis validators. If not specified explicitly, use all validator nodes.
-	if manifest.Validators == nil {
-		validatorsMap := make(map[string]int64)
+	if len(testnet.Validators) == 0 {
+		if testnet.Validators == nil { // Can this ever happen?
+			testnet.Validators = make(map[string]int64)
+		}
 		for _, node := range testnet.Nodes {
 			if node.Mode == ModeValidator {
-				validatorsMap[node.Name] = 100
+				testnet.Validators[node.Name] = 100
 			}
 		}
-		manifest.Validators = &validatorsMap
 	}
 
 	// Set up validator updates.
+	// NOTE: This map traversal is non-deterministic, but that's acceptable because
+	// the loop only constructs another map.
+	// We don't rely on traversal order for any side effects.
 	for heightStr, validators := range manifest.ValidatorUpdatesMap {
 		height, err := strconv.Atoi(heightStr)
 		if err != nil {
@@ -346,6 +347,30 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 			valUpdate[node.Name] = power
 		}
 		testnet.ValidatorUpdates[int64(height)] = valUpdate
+	}
+
+	if testnet.ConstantFlip {
+		// Pick "lowest" validator by name
+		var minNode string
+		for n := range testnet.Validators {
+			if len(minNode) == 0 || n < minNode {
+				minNode = n
+			}
+		}
+		if len(minNode) == 0 {
+			return nil, errors.New("`testnet.Validators` is empty")
+		}
+
+		const flipSpan = 3000
+		for i := max(1, manifest.InitialHeight); i < manifest.InitialHeight+flipSpan; i++ {
+			if _, ok := testnet.ValidatorUpdates[i]; ok {
+				continue
+			}
+			valUpdate := map[string]int64{
+				minNode: i % 2, // flipping every height
+			}
+			testnet.ValidatorUpdates[i] = valUpdate
+		}
 	}
 
 	return testnet, testnet.Validate()
@@ -664,34 +689,6 @@ func weightedRandomIndex(cumWeights []uint, sumWeights uint) int {
 // predefined weight for each lane in the list.
 func (t *Testnet) WeightedRandomLane() string {
 	return t.laneIDs[weightedRandomIndex(t.laneCumulativeWeights, t.sumWeights)]
-}
-
-//go:embed templates/prometheus-yaml.tmpl
-var prometheusYamlTemplate string
-
-func (t Testnet) prometheusConfigBytes() ([]byte, error) {
-	tmpl, err := template.New("prometheus-yaml").Parse(prometheusYamlTemplate)
-	if err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	err = tmpl.Execute(&buf, t)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (t Testnet) WritePrometheusConfig() error {
-	bytes, err := t.prometheusConfigBytes()
-	if err != nil {
-		return err
-	}
-	err = os.WriteFile(filepath.Join(t.Dir, "prometheus.yml"), bytes, 0o644) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // Address returns a P2P endpoint address for the node.
