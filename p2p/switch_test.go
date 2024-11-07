@@ -288,13 +288,13 @@ func TestSwitchPeerFilter(t *testing.T) {
 	p := wrapPeer(conn,
 		rp.nodeInfo(),
 		peerConfig{
-			streamDescs:   sw.streamDescs,
-			onPeerError:   sw.StopPeerForError,
-			isPersistent:  sw.IsPeerPersistent,
-			reactorsByCh:  sw.reactorsByCh,
-			msgTypeByChID: sw.msgTypeByChID,
-			metrics:       sw.metrics,
-			outbound:      true,
+			streamDescs:        sw.streamDescs,
+			onPeerError:        sw.StopPeerForError,
+			isPersistent:       sw.IsPeerPersistent,
+			reactorsByStreamID: sw.reactorsByCh,
+			msgTypeByStreamID:  sw.msgTypeByChID,
+			metrics:            sw.metrics,
+			outbound:           true,
 		},
 		rp.Addr(),
 		MConnConfig(sw.config))
@@ -346,13 +346,13 @@ func TestSwitchPeerFilterTimeout(t *testing.T) {
 	p := wrapPeer(conn,
 		rp.nodeInfo(),
 		peerConfig{
-			streamDescs:   sw.streamDescs,
-			onPeerError:   sw.StopPeerForError,
-			isPersistent:  sw.IsPeerPersistent,
-			reactorsByCh:  sw.reactorsByCh,
-			msgTypeByChID: sw.msgTypeByChID,
-			metrics:       sw.metrics,
-			outbound:      true,
+			streamDescs:        sw.streamDescs,
+			onPeerError:        sw.StopPeerForError,
+			isPersistent:       sw.IsPeerPersistent,
+			reactorsByStreamID: sw.reactorsByCh,
+			msgTypeByStreamID:  sw.msgTypeByChID,
+			metrics:            sw.metrics,
+			outbound:           true,
 		},
 		rp.Addr(),
 		MConnConfig(sw.config))
@@ -386,13 +386,13 @@ func TestSwitchPeerFilterDuplicate(t *testing.T) {
 	p := wrapPeer(conn,
 		rp.nodeInfo(),
 		peerConfig{
-			streamDescs:   sw.streamDescs,
-			onPeerError:   sw.StopPeerForError,
-			isPersistent:  sw.IsPeerPersistent,
-			reactorsByCh:  sw.reactorsByCh,
-			msgTypeByChID: sw.msgTypeByChID,
-			metrics:       sw.metrics,
-			outbound:      true,
+			streamDescs:        sw.streamDescs,
+			onPeerError:        sw.StopPeerForError,
+			isPersistent:       sw.IsPeerPersistent,
+			reactorsByStreamID: sw.reactorsByCh,
+			msgTypeByStreamID:  sw.msgTypeByChID,
+			metrics:            sw.metrics,
+			outbound:           true,
 		},
 		rp.Addr(),
 		MConnConfig(sw.config))
@@ -444,13 +444,13 @@ func TestSwitchStopsNonPersistentPeerOnError(t *testing.T) {
 	p := wrapPeer(conn,
 		rp.nodeInfo(),
 		peerConfig{
-			streamDescs:   sw.streamDescs,
-			onPeerError:   sw.StopPeerForError,
-			isPersistent:  sw.IsPeerPersistent,
-			reactorsByCh:  sw.reactorsByCh,
-			msgTypeByChID: sw.msgTypeByChID,
-			metrics:       sw.metrics,
-			outbound:      true,
+			streamDescs:        sw.streamDescs,
+			onPeerError:        sw.StopPeerForError,
+			isPersistent:       sw.IsPeerPersistent,
+			reactorsByStreamID: sw.reactorsByCh,
+			msgTypeByStreamID:  sw.msgTypeByChID,
+			metrics:            sw.metrics,
+			outbound:           true,
 		},
 		rp.Addr(),
 		MConnConfig(sw.config))
@@ -461,7 +461,7 @@ func TestSwitchStopsNonPersistentPeerOnError(t *testing.T) {
 	require.NotNil(sw.Peers().Get(rp.ID()))
 
 	// simulate failure by closing connection
-	err = p.(*peer).Conn().Close()
+	err = p.(*peer).Conn().Close("some error")
 	require.NoError(err)
 
 	assertNoPeersAfterTimeout(t, sw, 100*time.Millisecond)

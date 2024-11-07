@@ -95,7 +95,7 @@ func createOutboundPeerAndPerformHandshake(
 		ourNodeID   = nodekey.PubKeyToID(ed25519.GenPrivKey().PubKey())
 		ourNodeInfo = testNodeInfo(ourNodeID, "host_peer")
 	)
-	peerNodeInfo, err := handshake(ourNodeInfo, pc.conn, timeout)
+	peerNodeInfo, err := handshake(ourNodeInfo, pc, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func createOutboundPeerAndPerformHandshake(
 			testCh: &p2p.Message{},
 		}
 	)
-	p := newPeer(pc, mConfig, peerNodeInfo, reactorsByCh, msgTypeByChID, streamDescs, func(_ Peer, _ any) {})
+	p := newPeer(pc, mConfig, peerNodeInfo, reactorsByCh, msgTypeByChID, func(_ Peer, _ any) {})
 	p.SetLogger(log.TestingLogger().With("peer", addr))
 	return p, nil
 }

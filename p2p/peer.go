@@ -37,10 +37,10 @@ type peerConfig struct {
 	// isPersistent allows you to set a function, which, given socket address
 	// (for outbound peers) OR self-reported address (for inbound peers), tells
 	// if the peer is persistent or not.
-	isPersistent  func(*na.NetAddr) bool
-	reactorsByCh  map[byte]Reactor
-	msgTypeByChID map[byte]proto.Message
-	metrics       *Metrics
+	isPersistent       func(*na.NetAddr) bool
+	reactorsByStreamID map[byte]Reactor
+	msgTypeByStreamID  map[byte]proto.Message
+	metrics            *Metrics
 }
 
 // Peer is an interface representing a peer connected on a reactor.
@@ -79,7 +79,7 @@ type Peer interface {
 type peerConn struct {
 	outbound   bool
 	persistent bool
-	conn       Connection // Source connection
+	Connection // Source connection
 
 	socketAddr *na.NetAddr
 
@@ -95,7 +95,7 @@ func newPeerConn(
 	return peerConn{
 		outbound:   outbound,
 		persistent: persistent,
-		conn:       conn,
+		Connection:       conn,
 		socketAddr: socketAddr,
 	}
 }
@@ -113,7 +113,7 @@ func (pc peerConn) RemoteIP() net.IP {
 		return pc.ip
 	}
 
-	host, _, err := net.SplitHostPort(pc.conn.RemoteAddr().String())
+	host, _, err := net.SplitHostPort(pc.RemoteAddr().String())
 	if err != nil {
 		panic(err)
 	}
@@ -158,9 +158,8 @@ func newPeer(
 	pc peerConn,
 	mConfig tcpconn.MConnConfig,
 	nodeInfo ni.NodeInfo,
-	reactorsByCh map[byte]Reactor,
-	msgTypeByChID map[byte]proto.Message,
-	streams []StreamDescriptor,
+	reactorsByStreamID map[byte]Reactor,
+	msgTypeByStreamID map[byte]proto.Message,
 	onPeerError func(Peer, any),
 	options ...PeerOption,
 ) *peer {
@@ -173,7 +172,7 @@ func newPeer(
 		pendingMetrics: newPeerPendingMetricsCache(),
 	}
 
-	go p.readLoop()
+	go p.readLoop(reactorsByStreamID, msgTypeByStreamID)
 
 	p.BaseService = *service.NewBaseService(nil, "Peer", p)
 	for _, option := range options {
@@ -183,43 +182,47 @@ func newPeer(
 	return p
 }
 
-func (p *peer) readLoop() {
+func (p *peer) readLoop(reactorsByStreamID map[byte]Reactor, msgTypeByStreamID map[byte]proto.Message) {
 	for {
 		select {
 		case <-p.Quit():
 			return
 		default:
-			_, err := p.peerConn.conn.Read()
-			if err != nil {
-				p.Logger.Debug("Error reading from connection", "err", err)
-				p.Stop()
-				return
-			}
+			// TODO: establish priority for reading from streams (consensus -> evidence -> mempool).
+			for streamID, reactor := range reactorsByStreamID {
+				buf := make([]byte, 1024) // TODO max msg size for this stream
 
-			reactor := reactorsByCh[chID]
-			if reactor == nil {
-				// Note that its ok to panic here as it's caught in the conn._recover,
-				// which does onPeerError.
-				panic(fmt.Sprintf("Unknown channel %X", chID))
-			}
-			mt := msgTypeByChID[chID]
-			msg := proto.Clone(mt)
-			err := proto.Unmarshal(msgBytes, msg)
-			if err != nil {
-				panic(fmt.Sprintf("unmarshaling message: %v into type: %s", err, reflect.TypeOf(mt)))
-			}
-			if w, ok := msg.(types.Unwrapper); ok {
-				msg, err = w.Unwrap()
+				n, err := p.peerConn.Read(streamID, buf)
 				if err != nil {
-					panic(fmt.Sprintf("unwrapping message: %v", err))
+					p.Logger.Debug("Error reading from stream", "stream", streamID,  "err", err)
+					p.Stop()
+					return
 				}
+				if n == 0 {
+					continue
+				}
+
+				mt := msgTypeByStreamID[streamID]
+				msg := proto.Clone(mt)
+				err = proto.Unmarshal(buf[:n], msg)
+				if err != nil {
+					panic(fmt.Sprintf("unmarshaling message: %v into type: %s", err, reflect.TypeOf(mt)))
+				}
+
+				if w, ok := msg.(types.Unwrapper); ok {
+					msg, err = w.Unwrap()
+					if err != nil {
+						panic(fmt.Sprintf("unwrapping message: %v", err))
+					}
+				}
+
+				p.pendingMetrics.AddPendingRecvBytes(getMsgType(msg), n)
+				reactor.Receive(Envelope{
+					ChannelID: streamID,
+					Src:       p,
+					Message:   msg,
+				})
 			}
-			p.pendingMetrics.AddPendingRecvBytes(getMsgType(msg), len(msgBytes))
-			reactor.Receive(Envelope{
-				ChannelID: chID,
-				Src:       p,
-				Message:   msg,
-			})
 		}
 	}
 }
@@ -470,8 +473,8 @@ func (p *peer) metricsReporter() {
 func createMConnection(
 	conn net.Conn,
 	p *peer,
-	reactorsByCh map[byte]Reactor,
-	msgTypeByChID map[byte]proto.Message,
+	reactorsByStreamID map[byte]Reactor,
+	msgTypeByStreamID map[byte]proto.Message,
 	streamDescs []StreamDescriptor,
 	onPeerError func(Peer, any),
 	config tcpconn.MConnConfig,
@@ -503,7 +506,7 @@ func createMConnection(
 	)
 }
 
-func wrapPeer(c net.Conn, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) Peer {
+func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) Peer {
 	persistent := false
 	if cfg.isPersistent != nil {
 		if cfg.outbound {
@@ -527,9 +530,8 @@ func wrapPeer(c net.Conn, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr
 		peerConn,
 		mConfig,
 		ni,
-		cfg.reactorsByCh,
-		cfg.msgTypeByChID,
-		cfg.streamDescs,
+		cfg.reactorsByStreamID,
+		cfg.msgTypeByStreamID,
 		cfg.onPeerError,
 		PeerMetrics(cfg.metrics),
 	)

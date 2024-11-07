@@ -2,7 +2,6 @@ package p2p
 
 import (
 	"fmt"
-	"net"
 	"time"
 
 	tmp2p "github.com/cometbft/cometbft/api/cometbft/p2p/v1"
@@ -12,11 +11,13 @@ import (
 	"github.com/cometbft/cometbft/p2p/nodekey"
 )
 
+const handshakeStreamID = 0x0
+
 // ErrRejected indicates that a Peer was rejected carrying additional
 // information as to the reason.
 type ErrRejected struct {
 	addr              na.NetAddr
-	conn              net.Conn
+	conn              Connection
 	err               error
 	id                nodekey.ID
 	isAuthFailure     bool
@@ -97,7 +98,7 @@ func (e ErrRejected) IsNodeInfoInvalid() bool { return e.isNodeInfoInvalid }
 func (e ErrRejected) IsSelf() bool { return e.isSelf }
 
 // Do a handshake and verify the node info.
-func handshake(ourNodeInfo ni.NodeInfo, c net.Conn, handshakeTimeout time.Duration) (ni.NodeInfo, error) {
+func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Duration) (ni.NodeInfo, error) {
 	nodeInfo, err := exchangeNodeInfo(ourNodeInfo, c, handshakeTimeout)
 	if err != nil {
 		return nil, ErrRejected{
@@ -155,8 +156,13 @@ func handshake(ourNodeInfo ni.NodeInfo, c net.Conn, handshakeTimeout time.Durati
 	return nodeInfo, nil
 }
 
-func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c net.Conn, timeout time.Duration) (peerNodeInfo ni.NodeInfo, err error) {
-	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c Connection, timeout time.Duration) (peerNodeInfo ni.NodeInfo, err error) {
+	stream, err := c.OpenStream(handshakeStreamID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = stream.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
 
@@ -165,16 +171,16 @@ func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c net.Conn, timeout time.Duration
 		pbpeerNodeInfo tmp2p.DefaultNodeInfo
 	)
 
-	go func(errc chan<- error, c net.Conn) {
+	go func(errc chan<- error, s Stream) {
 		ourNodeInfoProto := ourNodeInfo.(ni.Default).ToProto()
-		_, err := protoio.NewDelimitedWriter(c).WriteMsg(ourNodeInfoProto)
+		_, err := protoio.NewDelimitedWriter(s).WriteMsg(ourNodeInfoProto)
 		errc <- err
-	}(errc, c)
-	go func(errc chan<- error, c net.Conn) {
-		protoReader := protoio.NewDelimitedReader(c, ni.MaxSize())
+	}(errc, stream)
+	go func(errc chan<- error, s Stream) {
+		protoReader := protoio.NewDelimitedReader(s, ni.MaxSize())
 		_, err := protoReader.ReadMsg(&pbpeerNodeInfo)
 		errc <- err
-	}(errc, c)
+	}(errc, stream)
 
 	for i := 0; i < cap(errc); i++ {
 		err := <-errc
@@ -188,5 +194,5 @@ func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c net.Conn, timeout time.Duration
 		return nil, err
 	}
 
-	return peerNodeInfo, c.SetDeadline(time.Time{})
+	return peerNodeInfo, stream.Close()
 }
