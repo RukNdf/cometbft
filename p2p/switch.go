@@ -6,8 +6,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/cosmos/gogoproto/proto"
-
 	"github.com/cometbft/cometbft/config"
 	"github.com/cometbft/cometbft/internal/cmap"
 	"github.com/cometbft/cometbft/internal/rand"
@@ -35,6 +33,8 @@ const (
 	reconnectBackOffBaseSeconds = 3
 
 	defaultFilterTimeout = 5 * time.Second
+
+	handshakeStreamID = 0x00
 )
 
 // MConnConfig returns an MConnConfig with fields updated
@@ -78,17 +78,15 @@ type PeerFilterFunc func(IPeerSet, Peer) error
 type Switch struct {
 	service.BaseService
 
-	config        *config.P2PConfig
-	reactors      map[string]Reactor
-	streamDescs   []StreamDescriptor
-	reactorsByCh  map[byte]Reactor
-	msgTypeByChID map[byte]proto.Message
-	peers         *PeerSet
-	dialing       *cmap.CMap
-	reconnecting  *cmap.CMap
-	nodeInfo      ni.NodeInfo      // our node info
-	nodeKey       *nodekey.NodeKey // our node privkey
-	addrBook      AddrBook
+	config               *config.P2PConfig
+	reactors             map[string]Reactor
+	streamInfoByStreamID map[byte]streamInfo
+	peers                *PeerSet
+	dialing              *cmap.CMap
+	reconnecting         *cmap.CMap
+	nodeInfo             ni.NodeInfo      // our node info
+	nodeKey              *nodekey.NodeKey // our node privkey
+	addrBook             AddrBook
 	// peers addresses with whom we'll maintain constant connection
 	persistentPeersAddrs []*na.NetAddr
 	unconditionalPeerIDs map[nodekey.ID]struct{}
@@ -121,9 +119,7 @@ func NewSwitch(
 	sw := &Switch{
 		config:               cfg,
 		reactors:             make(map[string]Reactor),
-		streamDescs:          make([]StreamDescriptor, 0),
-		reactorsByCh:         make(map[byte]Reactor),
-		msgTypeByChID:        make(map[byte]proto.Message),
+		streamInfoByStreamID: make(map[byte]streamInfo),
 		peers:                NewPeerSet(),
 		dialing:              cmap.NewCMap(),
 		reconnecting:         cmap.NewCMap(),
@@ -168,15 +164,17 @@ func WithMetrics(metrics *Metrics) SwitchOption {
 // NOTE: Not goroutine safe.
 func (sw *Switch) AddReactor(name string, reactor Reactor) Reactor {
 	for _, streamDesc := range reactor.StreamDescriptors() {
-		id := streamDesc.StreamID()
+		streamID := streamDesc.StreamID()
+
 		// No two reactors can share the same channel.
-		if sw.reactorsByCh[id] != nil {
-			panic(fmt.Sprintf("Stream %X has multiple reactors %v & %v", id, sw.reactorsByCh[id], reactor))
+		if _, ok := sw.streamInfoByStreamID[streamID]; ok {
+			panic(fmt.Sprintf("stream %X has multiple reactors %v & %v",
+				streamID, sw.streamInfoByStreamID[streamID].reactor, reactor))
 		}
-		sw.streamDescs = append(sw.streamDescs, streamDesc)
-		sw.reactorsByCh[id] = reactor
-		sw.msgTypeByChID[id] = streamDesc.MessageType()
+
+		sw.streamInfoByStreamID[streamID] = streamInfo{reactor: reactor, msgType: streamDesc.MessageType()}
 	}
+
 	sw.reactors[name] = reactor
 	reactor.SetSwitch(sw)
 	return reactor
@@ -186,15 +184,7 @@ func (sw *Switch) AddReactor(name string, reactor Reactor) Reactor {
 // NOTE: Not goroutine safe.
 func (sw *Switch) RemoveReactor(name string, reactor Reactor) {
 	for _, streamDesc := range reactor.StreamDescriptors() {
-		// remove channel description
-		for i := 0; i < len(sw.streamDescs); i++ {
-			if streamDesc.StreamID() == sw.streamDescs[i].StreamID() {
-				sw.streamDescs = append(sw.streamDescs[:i], sw.streamDescs[i+1:]...)
-				break
-			}
-		}
-		delete(sw.reactorsByCh, streamDesc.StreamID())
-		delete(sw.msgTypeByChID, streamDesc.StreamID())
+		delete(sw.streamInfoByStreamID, streamDesc.StreamID())
 	}
 	delete(sw.reactors, name)
 	reactor.SetSwitch(nil)
@@ -673,15 +663,22 @@ func (sw *Switch) acceptRoutine() {
 			break
 		}
 
-		nodeInfo, err := handshake(sw.nodeInfo, conn, sw.config.HandshakeTimeout)
+		stream, err := conn.OpenStream(handshakeStreamID)
+		if err != nil {
+			_ = sw.transport.Cleanup(conn)
+			continue
+		}
+		defer stream.Close()
+
+		nodeInfo, err := handshake(sw.nodeInfo, stream, sw.config.HandshakeTimeout)
 		if err != nil {
 			errRejected, ok := err.(ErrRejected)
 			if ok && errRejected.IsSelf() {
 				// Remove the given address from the address book and add to our addresses
 				// to avoid dialing in the future.
-				addr := errRejected.Addr()
-				sw.addrBook.RemoveAddress(&addr)
-				sw.addrBook.AddOurAddress(&addr)
+				addr := na.New(sw.nodeInfo.ID(), conn.RemoteAddr())
+				sw.addrBook.RemoveAddress(addr)
+				sw.addrBook.AddOurAddress(addr)
 			}
 
 			_ = sw.transport.Cleanup(conn)
@@ -695,20 +692,26 @@ func (sw *Switch) acceptRoutine() {
 			continue
 		}
 
-		p := wrapPeer(
+		p, err := wrapPeer(
 			conn,
 			nodeInfo,
 			peerConfig{
-				streamDescs:   sw.streamDescs,
-				onPeerError:   sw.StopPeerForError,
-				isPersistent:  sw.IsPeerPersistent,
-				reactorsByCh:  sw.reactorsByCh,
-				msgTypeByChID: sw.msgTypeByChID,
-				metrics:       sw.metrics,
-				outbound:      false,
+				onPeerError:          sw.StopPeerForError,
+				isPersistent:         sw.IsPeerPersistent,
+				streamInfoByStreamID: sw.streamInfoByStreamID,
+				metrics:              sw.metrics,
+				outbound:             false,
 			},
 			addr,
 			MConnConfig(sw.config))
+		if err != nil {
+			sw.Logger.Info(
+				"Ignoring inbound connection: error while wrapping peer",
+				"err", err,
+			)
+			_ = sw.transport.Cleanup(conn)
+			continue
+		}
 
 		if !sw.IsPeerUnconditional(p.NodeInfo().ID()) {
 			// Ignore connection if we already have enough peers.
@@ -769,7 +772,14 @@ func (sw *Switch) addOutboundPeerWithConfig(
 		return err
 	}
 
-	nodeInfo, err := handshake(sw.nodeInfo, conn, sw.config.HandshakeTimeout)
+	stream, err := conn.OpenStream(handshakeStreamID)
+	if err != nil {
+		_ = sw.transport.Cleanup(conn)
+		return err
+	}
+	defer stream.Close()
+
+	nodeInfo, err := handshake(sw.nodeInfo, stream, sw.config.HandshakeTimeout)
 	if err != nil {
 		errRejected, ok := err.(ErrRejected)
 		if ok && errRejected.IsSelf() {
@@ -784,20 +794,22 @@ func (sw *Switch) addOutboundPeerWithConfig(
 		return err
 	}
 
-	p := wrapPeer(
+	p, err := wrapPeer(
 		conn,
 		nodeInfo,
 		peerConfig{
-			streamDescs:        sw.streamDescs,
-			onPeerError:        sw.StopPeerForError,
-			isPersistent:       sw.IsPeerPersistent,
-			reactorsByStreamID: sw.reactorsByCh,
-			msgTypeByStreamID:  sw.msgTypeByChID,
-			metrics:            sw.metrics,
-			outbound:           true,
+			onPeerError:          sw.StopPeerForError,
+			isPersistent:         sw.IsPeerPersistent,
+			streamInfoByStreamID: sw.streamInfoByStreamID,
+			metrics:              sw.metrics,
+			outbound:             true,
 		},
 		addr,
 		MConnConfig(sw.config))
+	if err != nil {
+		_ = sw.transport.Cleanup(conn)
+		return err
+	}
 
 	if err := sw.addPeer(p); err != nil {
 		_ = sw.transport.Cleanup(conn)

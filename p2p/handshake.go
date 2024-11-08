@@ -2,22 +2,24 @@ package p2p
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	tmp2p "github.com/cometbft/cometbft/api/cometbft/p2p/v1"
 	"github.com/cometbft/cometbft/libs/protoio"
-	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
 )
 
-const handshakeStreamID = 0x0
+type HandshakeStream interface {
+	SetDeadline(time.Time) error
+	io.ReadWriter
+}
 
 // ErrRejected indicates that a Peer was rejected carrying additional
 // information as to the reason.
 type ErrRejected struct {
-	addr              na.NetAddr
-	conn              Connection
+	conn              HandshakeStream
 	err               error
 	id                nodekey.ID
 	isAuthFailure     bool
@@ -28,11 +30,6 @@ type ErrRejected struct {
 	isSelf            bool
 }
 
-// Addr returns the network address for the rejected Peer.
-func (e ErrRejected) Addr() na.NetAddr {
-	return e.addr
-}
-
 func (e ErrRejected) Error() string {
 	if e.isAuthFailure {
 		return fmt.Sprintf("auth failure: %s", e.err)
@@ -40,10 +37,7 @@ func (e ErrRejected) Error() string {
 
 	if e.isDuplicate {
 		if e.conn != nil {
-			return fmt.Sprintf(
-				"duplicate CONN<%s>",
-				e.conn.RemoteAddr().String(),
-			)
+			return "duplicate CONN"
 		}
 		if e.id != "" {
 			return fmt.Sprintf("duplicate ID<%v>", e.id)
@@ -52,11 +46,7 @@ func (e ErrRejected) Error() string {
 
 	if e.isFiltered {
 		if e.conn != nil {
-			return fmt.Sprintf(
-				"filtered CONN<%s>: %s",
-				e.conn.RemoteAddr().String(),
-				e.err,
-			)
+			return fmt.Sprintf("filtered CONN: %s", e.err)
 		}
 
 		if e.id != "" {
@@ -98,11 +88,11 @@ func (e ErrRejected) IsNodeInfoInvalid() bool { return e.isNodeInfoInvalid }
 func (e ErrRejected) IsSelf() bool { return e.isSelf }
 
 // Do a handshake and verify the node info.
-func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Duration) (ni.NodeInfo, error) {
-	nodeInfo, err := exchangeNodeInfo(ourNodeInfo, c, handshakeTimeout)
+func handshake(ourNodeInfo ni.NodeInfo, s HandshakeStream, handshakeTimeout time.Duration) (ni.NodeInfo, error) {
+	nodeInfo, err := exchangeNodeInfo(ourNodeInfo, s, handshakeTimeout)
 	if err != nil {
 		return nil, ErrRejected{
-			conn:          c,
+			conn:          s,
 			err:           fmt.Errorf("handshake failed: %w", err),
 			isAuthFailure: true,
 		}
@@ -110,7 +100,7 @@ func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Dura
 
 	if err := nodeInfo.Validate(); err != nil {
 		return nil, ErrRejected{
-			conn:              c,
+			conn:              s,
 			err:               err,
 			isNodeInfoInvalid: true,
 		}
@@ -137,8 +127,7 @@ func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Dura
 	// Reject self.
 	if ourNodeInfo.ID() == nodeInfo.ID() {
 		return nil, ErrRejected{
-			addr:   *na.New(nodeInfo.ID(), c.RemoteAddr()),
-			conn:   c,
+			conn:   s,
 			id:     nodeInfo.ID(),
 			isSelf: true,
 		}
@@ -146,7 +135,7 @@ func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Dura
 
 	if err := ourNodeInfo.CompatibleWith(nodeInfo); err != nil {
 		return nil, ErrRejected{
-			conn:           c,
+			conn:           s,
 			err:            err,
 			id:             nodeInfo.ID(),
 			isIncompatible: true,
@@ -156,13 +145,8 @@ func handshake(ourNodeInfo ni.NodeInfo, c Connection, handshakeTimeout time.Dura
 	return nodeInfo, nil
 }
 
-func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c Connection, timeout time.Duration) (peerNodeInfo ni.NodeInfo, err error) {
-	stream, err := c.OpenStream(handshakeStreamID)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = stream.SetDeadline(time.Now().Add(timeout)); err != nil {
+func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, s HandshakeStream, timeout time.Duration) (peerNodeInfo ni.NodeInfo, err error) {
+	if err = s.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
 
@@ -171,16 +155,16 @@ func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c Connection, timeout time.Durati
 		pbpeerNodeInfo tmp2p.DefaultNodeInfo
 	)
 
-	go func(errc chan<- error, s Stream) {
+	go func(errc chan<- error, s HandshakeStream) {
 		ourNodeInfoProto := ourNodeInfo.(ni.Default).ToProto()
 		_, err := protoio.NewDelimitedWriter(s).WriteMsg(ourNodeInfoProto)
 		errc <- err
-	}(errc, stream)
-	go func(errc chan<- error, s Stream) {
+	}(errc, s)
+	go func(errc chan<- error, s HandshakeStream) {
 		protoReader := protoio.NewDelimitedReader(s, ni.MaxSize())
 		_, err := protoReader.ReadMsg(&pbpeerNodeInfo)
 		errc <- err
-	}(errc, stream)
+	}(errc, s)
 
 	for i := 0; i < cap(errc); i++ {
 		err := <-errc
@@ -194,5 +178,5 @@ func exchangeNodeInfo(ourNodeInfo ni.NodeInfo, c Connection, timeout time.Durati
 		return nil, err
 	}
 
-	return peerNodeInfo, stream.Close()
+	return peerNodeInfo, s.SetDeadline(time.Time{})
 }

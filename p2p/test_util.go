@@ -9,7 +9,6 @@ import (
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	cmtnet "github.com/cometbft/cometbft/internal/net"
 	"github.com/cometbft/cometbft/libs/log"
-	"github.com/cometbft/cometbft/p2p/internal/fuzz"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -28,11 +27,11 @@ func CreateRandomPeer(outbound bool) Peer {
 	addr, netAddr := na.CreateRoutableAddr()
 	p := &peer{
 		peerConn: peerConn{
-			outbound:   outbound,
+			outbound: outbound,
+			// Connection: &conn.MConnection{},
 			socketAddr: netAddr,
 		},
 		nodeInfo: mockNodeInfo{netAddr},
-		mconn:    &conn.MConnection{},
 		metrics:  NopMetrics(),
 	}
 	p.SetLogger(log.TestingLogger().With("peer", addr))
@@ -100,14 +99,14 @@ func Connect2Switches(switches []*Switch, i, j int) {
 
 	doneCh := make(chan struct{})
 	go func() {
-		err := switchI.addPeerWithConnection(c1)
+		err := switchI.addPeerWithConnection(mockConnection{c1})
 		if err != nil {
 			panic(err)
 		}
 		doneCh <- struct{}{}
 	}()
 	go func() {
-		err := switchJ.addPeerWithConnection(c2)
+		err := switchJ.addPeerWithConnection(mockConnection{c2})
 		if err != nil {
 			panic(err)
 		}
@@ -133,14 +132,14 @@ func ConnectStarSwitches(c int) func([]*Switch, int, int) {
 
 		doneCh := make(chan struct{})
 		go func() {
-			err := switchI.addPeerWithConnection(c1)
+			err := switchI.addPeerWithConnection(mockConnection{c1})
 			if err != nil {
 				panic(err)
 			}
 			doneCh <- struct{}{}
 		}()
 		go func() {
-			err := switchJ.addPeerWithConnection(c2)
+			err := switchJ.addPeerWithConnection(mockConnection{c2})
 			if err != nil {
 				panic(err)
 			}
@@ -151,37 +150,46 @@ func ConnectStarSwitches(c int) func([]*Switch, int, int) {
 	}
 }
 
-func (sw *Switch) addPeerWithConnection(conn net.Conn) error {
-	pc, err := testInboundPeerConn(conn, sw.config)
-	if err != nil {
-		if err := conn.Close(); err != nil {
-			sw.Logger.Error("Error closing connection", "err", err)
-		}
-		return err
-	}
-
-	ni, err := handshake(sw.nodeInfo, conn, time.Second)
-	if err != nil {
-		if cErr := conn.Close(); cErr != nil {
+func (sw *Switch) addPeerWithConnection(conn Connection) error {
+	closeConn := func(err error) {
+		if cErr := conn.Close(err.Error()); cErr != nil {
 			sw.Logger.Error("Error closing connection", "err", cErr)
 		}
+	}
+
+	pc, err := testInboundPeerConn(conn, sw.config)
+	if err != nil {
+		closeConn(err)
 		return err
 	}
 
-	p := newPeer(
+	stream, err := conn.OpenStream(testCh)
+	if err != nil {
+		closeConn(err)
+		return err
+	}
+	defer stream.Close()
+
+	ni, err := handshake(sw.nodeInfo, stream, time.Second)
+	if err != nil {
+		closeConn(err)
+		return err
+	}
+
+	p, err := newPeer(
 		pc,
 		MConnConfig(sw.config),
 		ni,
-		sw.reactorsByCh,
-		sw.msgTypeByChID,
-		sw.streamDescs,
+		sw.streamInfoByStreamID,
 		sw.StopPeerForError,
 	)
+	if err != nil {
+		closeConn(err)
+		return err
+	}
 
 	if err = sw.addPeer(p); err != nil {
-		if cErr := conn.Close(); cErr != nil {
-			sw.Logger.Error("Error closing connection", "err", cErr)
-		}
+		closeConn(err)
 		return err
 	}
 
@@ -229,7 +237,7 @@ func MakeSwitch(
 	sw.SetNodeKey(&nk)
 
 	// reset channels
-	for ch := range sw.reactorsByCh {
+	for ch := range sw.streamInfoByStreamID {
 		if ch != testCh {
 			nodeInfo.Channels = append(nodeInfo.Channels, ch)
 		}
@@ -241,7 +249,7 @@ func MakeSwitch(
 }
 
 func testInboundPeerConn(
-	conn net.Conn,
+	conn Connection,
 	config *config.P2PConfig,
 	// ourNodePrivKey crypto.PrivKey,
 ) (peerConn, error) {
@@ -249,7 +257,7 @@ func testInboundPeerConn(
 }
 
 func testPeerConn(
-	rawConn net.Conn,
+	rawConn Connection,
 	cfg *config.P2PConfig,
 	outbound, persistent bool,
 	// _ourNodePrivKey crypto.PrivKey,
@@ -258,10 +266,11 @@ func testPeerConn(
 	conn := rawConn
 
 	// Fuzz connection
-	if cfg.TestFuzz {
-		// so we have time to do peer handshakes and get set up
-		conn = fuzz.ConnAfterFromConfig(conn, 10*time.Second, cfg.TestFuzzConfig)
-	}
+	// TODO: uncomment
+	// if cfg.TestFuzz {
+	// 	// so we have time to do peer handshakes and get set up
+	// 	conn = fuzz.ConnAfterFromConfig(conn, 10*time.Second, cfg.TestFuzzConfig)
+	// }
 
 	// Only the information we already have
 	return newPeerConn(outbound, persistent, conn, socketAddr), nil

@@ -37,10 +37,9 @@ type peerConfig struct {
 	// isPersistent allows you to set a function, which, given socket address
 	// (for outbound peers) OR self-reported address (for inbound peers), tells
 	// if the peer is persistent or not.
-	isPersistent       func(*na.NetAddr) bool
-	reactorsByStreamID map[byte]Reactor
-	msgTypeByStreamID  map[byte]proto.Message
-	metrics            *Metrics
+	isPersistent         func(*na.NetAddr) bool
+	streamInfoByStreamID map[byte]streamInfo
+	metrics              *Metrics
 }
 
 // Peer is an interface representing a peer connected on a reactor.
@@ -59,7 +58,7 @@ type Peer interface {
 	Conn() Connection
 
 	NodeInfo() ni.NodeInfo // peer's info
-	Status() tcpconn.ConnectionStatus
+	Status() any
 	SocketAddr() *na.NetAddr // actual address of the socket
 
 	HasChannel(chID byte) bool // Does the peer implement this channel?
@@ -95,7 +94,7 @@ func newPeerConn(
 	return peerConn{
 		outbound:   outbound,
 		persistent: persistent,
-		Connection:       conn,
+		Connection: conn,
 		socketAddr: socketAddr,
 	}
 }
@@ -141,6 +140,7 @@ type peer struct {
 	// cached to avoid copying nodeInfo in HasChannel
 	nodeInfo ni.NodeInfo
 	channels []byte
+	streams  map[byte]Stream
 
 	// User data
 	Data *cmap.CMap
@@ -154,15 +154,19 @@ type peer struct {
 
 type PeerOption func(*peer)
 
+type streamInfo struct {
+	reactor Reactor
+	msgType proto.Message
+}
+
 func newPeer(
 	pc peerConn,
 	mConfig tcpconn.MConnConfig,
 	nodeInfo ni.NodeInfo,
-	reactorsByStreamID map[byte]Reactor,
-	msgTypeByStreamID map[byte]proto.Message,
+	streamInfoByStreamID map[byte]streamInfo,
 	onPeerError func(Peer, any),
 	options ...PeerOption,
-) *peer {
+) (*peer, error) {
 	p := &peer{
 		peerConn:       pc,
 		nodeInfo:       nodeInfo,
@@ -172,29 +176,38 @@ func newPeer(
 		pendingMetrics: newPeerPendingMetricsCache(),
 	}
 
-	go p.readLoop(reactorsByStreamID, msgTypeByStreamID)
+	// Open streams for all reactors.
+	p.streams = make(map[byte]Stream)
+	for streamID := range streamInfoByStreamID {
+		stream, err := p.peerConn.OpenStream(streamID)
+		if err != nil {
+			return nil, fmt.Errorf("opening stream %v: %w", streamID, err)
+		}
+		p.streams[streamID] = stream
+	}
+
+	go p.readLoop(streamInfoByStreamID)
 
 	p.BaseService = *service.NewBaseService(nil, "Peer", p)
 	for _, option := range options {
 		option(p)
 	}
 
-	return p
+	return p, nil
 }
 
-func (p *peer) readLoop(reactorsByStreamID map[byte]Reactor, msgTypeByStreamID map[byte]proto.Message) {
+func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
 	for {
 		select {
 		case <-p.Quit():
 			return
 		default:
 			// TODO: establish priority for reading from streams (consensus -> evidence -> mempool).
-			for streamID, reactor := range reactorsByStreamID {
+			for streamID, stream := range p.streams {
 				buf := make([]byte, 1024) // TODO max msg size for this stream
-
-				n, err := p.peerConn.Read(streamID, buf)
+				n, err := stream.Read(buf)
 				if err != nil {
-					p.Logger.Debug("Error reading from stream", "stream", streamID,  "err", err)
+					p.Logger.Error("Error reading from stream", "stream", streamID, "err", err)
 					p.Stop()
 					return
 				}
@@ -202,21 +215,26 @@ func (p *peer) readLoop(reactorsByStreamID map[byte]Reactor, msgTypeByStreamID m
 					continue
 				}
 
-				mt := msgTypeByStreamID[streamID]
-				msg := proto.Clone(mt)
+				msgType := streamInfoByStreamID[streamID].msgType
+				msg := proto.Clone(msgType)
 				err = proto.Unmarshal(buf[:n], msg)
 				if err != nil {
-					panic(fmt.Sprintf("unmarshaling message: %v into type: %s", err, reflect.TypeOf(mt)))
+					p.Logger.Error("Error unmarshaling message", "as", reflect.TypeOf(msgType), "err", err)
+					p.Stop()
+					return
 				}
 
 				if w, ok := msg.(types.Unwrapper); ok {
 					msg, err = w.Unwrap()
 					if err != nil {
-						panic(fmt.Sprintf("unwrapping message: %v", err))
+						p.Logger.Error("Error uwrapping message", "err", err)
+						p.Stop()
+						return
 					}
 				}
 
 				p.pendingMetrics.AddPendingRecvBytes(getMsgType(msg), n)
+				reactor := streamInfoByStreamID[streamID].reactor
 				reactor.Receive(Envelope{
 					ChannelID: streamID,
 					Src:       p,
@@ -230,10 +248,10 @@ func (p *peer) readLoop(reactorsByStreamID map[byte]Reactor, msgTypeByStreamID m
 // String representation.
 func (p *peer) String() string {
 	if p.outbound {
-		return fmt.Sprintf("Peer{%v %v out}", p.conn, p.ID())
+		return fmt.Sprintf("Peer{%v %v out}", p, p.ID())
 	}
 
-	return fmt.Sprintf("Peer{%v %v in}", p.conn, p.ID())
+	return fmt.Sprintf("Peer{%v %v in}", p, p.ID())
 }
 
 // ---------------------------------------------------
@@ -264,15 +282,16 @@ func (p *peer) OnStart() error {
 //
 // NOTE: it is not safe to call this method more than once.
 func (p *peer) FlushStop() {
-	p.conn.FlushAndClose("stopping peer") // stop everything and close the conn
+	if err := p.FlushAndClose("stopping peer"); err != nil {
+		p.Logger.Debug("FlushAndClose", "err", err)
+	}
 }
 
 // OnStop implements BaseService.
 func (p *peer) OnStop() {
-	// if err := p.mconn.Stop(); err != nil { // stop everything and close the conn
-	// 	p.Logger.Debug("Error while stopping peer", "err", err)
-	// }
-	p.conn.Close("stopping peer")
+	if err := p.Close("stopping peer"); err != nil {
+		p.Logger.Debug("Close", "err", err)
+	}
 }
 
 // ---------------------------------------------------
@@ -308,7 +327,7 @@ func (p *peer) SocketAddr() *na.NetAddr {
 
 // Status returns the peer's ConnectionStatus.
 func (p *peer) Status() any {
-	return p.conn.ConnectionState()
+	return p.ConnectionState()
 }
 
 // Send msg bytes to the channel identified by chID byte. Returns false if the
@@ -316,8 +335,9 @@ func (p *peer) Status() any {
 //
 // thread safe.
 func (p *peer) Send(e Envelope) bool {
-	p.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return p.send(e.ChannelID, e.Message, p.conn.Write)
+	streamID := e.ChannelID
+	p.streams[streamID].SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return p.send(e.ChannelID, e.Message, p.streams[streamID].Write)
 }
 
 // TrySend msg bytes to the channel identified by chID byte. Immediately returns
@@ -325,11 +345,12 @@ func (p *peer) Send(e Envelope) bool {
 //
 // thread safe.
 func (p *peer) TrySend(e Envelope) bool {
-	p.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-	return p.send(e.ChannelID, e.Message, p.conn.Write)
+	streamID := e.ChannelID
+	p.streams[streamID].SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	return p.send(e.ChannelID, e.Message, p.streams[streamID].Write)
 }
 
-func (p *peer) send(streamID byte, msg proto.Message, sendFunc func(byte, []byte) (int, error)) bool {
+func (p *peer) send(streamID byte, msg proto.Message, sendFunc func([]byte) (int, error)) bool {
 	if !p.IsRunning() {
 		return false
 	} else if !p.HasChannel(streamID) {
@@ -347,7 +368,7 @@ func (p *peer) send(streamID byte, msg proto.Message, sendFunc func(byte, []byte
 		return false
 	}
 
-	n, err := sendFunc(streamID, msgBytes)
+	n, err := sendFunc(msgBytes)
 	if err != nil {
 		p.Logger.Error("Failed to send msg to stream", "err", err, "streamID", streamID, "msg", msg)
 		return false
@@ -386,7 +407,7 @@ func (p *peer) HasChannel(chID byte) bool {
 
 // Conn returns the underlying peer source connection.
 func (p *peer) Conn() Connection {
-	return p.peerConn.conn
+	return p.Connection
 }
 
 func (p *peer) SetRemovalFailed() {
@@ -403,7 +424,7 @@ func (p *peer) GetRemovalFailed() bool {
 
 // RemoteAddr returns peer's remote network address.
 func (p *peer) RemoteAddr() net.Addr {
-	return p.peerConn.conn.RemoteAddr()
+	return p.RemoteAddr()
 }
 
 // CanSend returns true if the send queue is not full, false otherwise.
@@ -429,18 +450,19 @@ func (p *peer) metricsReporter() {
 	for {
 		select {
 		case <-metricsTicker.C:
-			status := p.mconn.Status()
-			var sendQueueSize float64
-			for _, chStatus := range status.Channels {
-				sendQueueSize += float64(chStatus.SendQueueSize)
-			}
+			// TODO: uncomment
+			// status := p.Status()
+			// var sendQueueSize float64
+			// for _, chStatus := range status.Channels {
+			// 	sendQueueSize += float64(chStatus.SendQueueSize)
+			// }
 
-			p.metrics.RecvRateLimiterDelay.With("peer_id", string(p.ID())).
-				Add(status.RecvMonitor.SleepTime.Seconds())
-			p.metrics.SendRateLimiterDelay.With("peer_id", string(p.ID())).
-				Add(status.SendMonitor.SleepTime.Seconds())
+			// p.metrics.RecvRateLimiterDelay.With("peer_id", string(p.ID())).
+			// 	Add(status.RecvMonitor.SleepTime.Seconds())
+			// p.metrics.SendRateLimiterDelay.With("peer_id", string(p.ID())).
+			// 	Add(status.SendMonitor.SleepTime.Seconds())
 
-			p.metrics.PeerPendingSendBytes.With("peer_id", string(p.ID())).Set(sendQueueSize)
+			// p.metrics.PeerPendingSendBytes.With("peer_id", string(p.ID())).Set(sendQueueSize)
 			// Report per peer, per message total bytes, since the last interval
 			func() {
 				p.pendingMetrics.mtx.Lock()
@@ -506,7 +528,7 @@ func createMConnection(
 	)
 }
 
-func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) Peer {
+func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) (Peer, error) {
 	persistent := false
 	if cfg.isPersistent != nil {
 		if cfg.outbound {
@@ -526,15 +548,12 @@ func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAd
 		socketAddr,
 	)
 
-	p := newPeer(
+	return newPeer(
 		peerConn,
 		mConfig,
 		ni,
-		cfg.reactorsByStreamID,
-		cfg.msgTypeByStreamID,
+		cfg.streamInfoByStreamID,
 		cfg.onPeerError,
 		PeerMetrics(cfg.metrics),
 	)
-
-	return p
 }
