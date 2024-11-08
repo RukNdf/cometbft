@@ -7,6 +7,7 @@ import (
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/libs/service"
 	"github.com/cometbft/cometbft/p2p"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -78,12 +79,12 @@ func (mp *Peer) Get(key string) any {
 func (mp *Peer) Set(key string, value any) {
 	mp.kv[key] = value
 }
-func (mp *Peer) RemoteIP() net.IP        { return mp.ip }
-func (mp *Peer) SocketAddr() *na.NetAddr { return mp.addr }
-func (mp *Peer) RemoteAddr() net.Addr    { return &net.TCPAddr{IP: mp.ip, Port: 8800} }
-func (mp *Peer) Conn() p2p.Connection    { return mockConnection{mp.server} }
-func (*Peer) SetRemovalFailed()          {}
-func (*Peer) GetRemovalFailed() bool     { return false }
+func (mp *Peer) RemoteIP() net.IP          { return mp.ip }
+func (mp *Peer) SocketAddr() *na.NetAddr   { return mp.addr }
+func (mp *Peer) RemoteAddr() net.Addr      { return &net.TCPAddr{IP: mp.ip, Port: 8800} }
+func (mp *Peer) Conn() abstract.Connection { return mockConnection{mp.server} }
+func (*Peer) SetRemovalFailed()            {}
+func (*Peer) GetRemovalFailed() bool       { return false }
 
 type mockStream struct {
 	net.Conn
@@ -92,9 +93,11 @@ type mockStream struct {
 func (s mockStream) Read(b []byte) (n int, err error) {
 	return s.Conn.Read(b)
 }
+
 func (s mockStream) Write(b []byte) (n int, err error) {
 	return s.Conn.Write(b)
 }
+
 func (mockStream) Close() error {
 	return nil
 }
@@ -106,12 +109,14 @@ type mockConnection struct {
 	net.Conn
 }
 
-func (c mockConnection) OpenStream(streamID byte) (p2p.Stream, error) {
+func (c mockConnection) OpenStream(streamID byte) (abstract.Stream, error) {
 	return mockStream{Conn: c.Conn}, nil
 }
+
 func (c mockConnection) LocalAddr() net.Addr {
 	return c.Conn.LocalAddr()
 }
+
 func (c mockConnection) RemoteAddr() net.Addr {
 	return c.Conn.RemoteAddr()
 }

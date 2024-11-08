@@ -22,6 +22,7 @@ import (
 	"github.com/cometbft/cometbft/libs/protoio"
 	"github.com/cometbft/cometbft/libs/service"
 	cmtsync "github.com/cometbft/cometbft/libs/sync"
+	"github.com/cometbft/cometbft/p2p/abstract"
 )
 
 const (
@@ -117,6 +118,8 @@ type MConnection struct {
 
 	_maxPacketMsgSize int
 }
+
+var _ abstract.Connection = (*MConnection)(nil)
 
 // MConnConfig is a MConnection configuration.
 type MConnConfig struct {
@@ -237,6 +240,10 @@ func (c *MConnection) OnStart() error {
 	return nil
 }
 
+func (c *MConnection) Conn() net.Conn {
+	return c.conn
+}
+
 // stopServices stops the BaseService and timers and closes the quitSendRoutine.
 // if the quitSendRoutine was already closed, it returns true, otherwise it returns false.
 // It uses the stopMtx to ensure only one of FlushStop and OnStop can do this at a time.
@@ -319,6 +326,31 @@ func (c *MConnection) OnStop() {
 	// recvRoutine may write to it after we've stopped.
 	// Though it doesn't need to get closed at all,
 	// we close it @ recvRoutine.
+}
+
+func (c *MConnection) Close(string) error {
+	return c.Stop()
+}
+
+func (c *MConnection) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *MConnection) RemoteAddr() net.Addr {
+	return c.conn.RemoteAddr()
+}
+
+func (c *MConnection) OpenStream(streamID byte) (abstract.Stream, error) {
+	return MConnectionStream{c.conn}, nil
+}
+
+func (c *MConnection) FlushAndClose(string) error {
+	c.FlushStop()
+	return nil
+}
+
+func (c *MConnection) ConnectionState() any {
+	return nil
 }
 
 func (c *MConnection) String() string {
@@ -930,3 +962,23 @@ func mustWrapPacketInto(pb proto.Message, dst *tmp2p.Packet) {
 		panic(fmt.Errorf("unknown packet type %T", pb))
 	}
 }
+
+// MCConnectionStream is just a wrapper around the original net.Conn.
+type MConnectionStream struct {
+	net.Conn
+}
+
+func (s MConnectionStream) Read(b []byte) (n int, err error) {
+	return s.Conn.Read(b)
+}
+
+func (s MConnectionStream) Write(b []byte) (n int, err error) {
+	return s.Conn.Write(b)
+}
+
+func (MConnectionStream) Close() error {
+	return nil
+}
+func (s MConnectionStream) SetDeadline(t time.Time) error      { return s.Conn.SetReadDeadline(t) }
+func (s MConnectionStream) SetReadDeadline(t time.Time) error  { return s.Conn.SetReadDeadline(t) }
+func (s MConnectionStream) SetWriteDeadline(t time.Time) error { return s.Conn.SetWriteDeadline(t) }

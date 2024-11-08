@@ -9,6 +9,7 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/cometbft/cometbft/crypto"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	"github.com/cometbft/cometbft/p2p/internal/fuzz"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -124,6 +125,7 @@ type MultiplexTransport struct {
 // Test multiplexTransport for interface completeness.
 var (
 	_ transportLifecycle = (*MultiplexTransport)(nil)
+	_ abstract.Transport = (*MultiplexTransport)(nil)
 )
 
 // NewMultiplexTransport returns a tcp connected multiplexed peer.
@@ -150,7 +152,7 @@ func (mt *MultiplexTransport) NetAddr() na.NetAddr {
 }
 
 // Accept implements Transport.
-func (mt *MultiplexTransport) Accept() (*conn.MConnection, *na.NetAddr, error) {
+func (mt *MultiplexTransport) Accept() (abstract.Connection, *na.NetAddr, error) {
 	select {
 	// This case should never have any side-effectful/blocking operations to
 	// ensure that quality peers are ready to be used.
@@ -168,7 +170,7 @@ func (mt *MultiplexTransport) Accept() (*conn.MConnection, *na.NetAddr, error) {
 }
 
 // Dial implements Transport.
-func (mt *MultiplexTransport) Dial(addr na.NetAddr) (*conn.MConnection, error) {
+func (mt *MultiplexTransport) Dial(addr na.NetAddr) (abstract.Connection, error) {
 	c, err := addr.DialTimeout(mt.dialTimeout)
 	if err != nil {
 		return nil, err
@@ -293,9 +295,10 @@ func (mt *MultiplexTransport) acceptPeers() {
 
 // Cleanup removes the given address from the connections set and
 // closes the connection.
-func (mt *MultiplexTransport) Cleanup(c net.Conn) error {
-	mt.conns.Remove(c)
-	return c.Close()
+func (mt *MultiplexTransport) Cleanup(c abstract.Connection) error {
+	mconn := c.(*conn.MConnection)
+	mt.conns.Remove(mconn.Conn())
+	return mconn.Stop()
 }
 
 func (mt *MultiplexTransport) filterConn(c net.Conn) (err error) {
@@ -347,7 +350,8 @@ func (mt *MultiplexTransport) upgrade(
 	var err error
 	defer func() {
 		if err != nil {
-			_ = mt.Cleanup(c)
+			mt.conns.Remove(c)
+			_ = c.Close()
 		}
 	}()
 

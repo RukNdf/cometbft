@@ -10,6 +10,7 @@ import (
 	"github.com/cometbft/cometbft/internal/cmap"
 	"github.com/cometbft/cometbft/internal/rand"
 	"github.com/cometbft/cometbft/libs/service"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -91,7 +92,7 @@ type Switch struct {
 	persistentPeersAddrs []*na.NetAddr
 	unconditionalPeerIDs map[nodekey.ID]struct{}
 
-	transport Transport
+	transport abstract.Transport
 
 	filterTimeout time.Duration
 	peerFilters   []PeerFilterFunc
@@ -113,7 +114,7 @@ type SwitchOption func(*Switch)
 // NewSwitch creates a new Switch with the given config.
 func NewSwitch(
 	cfg *config.P2PConfig,
-	transport Transport,
+	transport abstract.Transport,
 	options ...SwitchOption,
 ) *Switch {
 	sw := &Switch{

@@ -11,6 +11,7 @@ import (
 	"github.com/cometbft/cometbft/internal/cmap"
 	"github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/libs/service"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -55,7 +56,7 @@ type Peer interface {
 	IsPersistent() bool // do we redial this peer when we disconnect
 
 	// Conn returns the underlying connection.
-	Conn() Connection
+	Conn() abstract.Connection
 
 	NodeInfo() ni.NodeInfo // peer's info
 	Status() any
@@ -76,9 +77,9 @@ type Peer interface {
 
 // peerConn contains the raw connection and its config.
 type peerConn struct {
-	outbound   bool
-	persistent bool
-	Connection // Source connection
+	outbound            bool
+	persistent          bool
+	abstract.Connection // Source connection
 
 	socketAddr *na.NetAddr
 
@@ -88,7 +89,7 @@ type peerConn struct {
 
 func newPeerConn(
 	outbound, persistent bool,
-	conn Connection,
+	conn abstract.Connection,
 	socketAddr *na.NetAddr,
 ) peerConn {
 	return peerConn{
@@ -140,7 +141,7 @@ type peer struct {
 	// cached to avoid copying nodeInfo in HasChannel
 	nodeInfo ni.NodeInfo
 	channels []byte
-	streams  map[byte]Stream
+	streams  map[byte]abstract.Stream
 
 	// User data
 	Data *cmap.CMap
@@ -177,7 +178,7 @@ func newPeer(
 	}
 
 	// Open streams for all reactors.
-	p.streams = make(map[byte]Stream)
+	p.streams = make(map[byte]abstract.Stream)
 	for streamID := range streamInfoByStreamID {
 		stream, err := p.peerConn.OpenStream(streamID)
 		if err != nil {
@@ -414,7 +415,7 @@ func (p *peer) HasChannel(chID byte) bool {
 }
 
 // Conn returns the underlying peer source connection.
-func (p *peer) Conn() Connection {
+func (p *peer) Conn() abstract.Connection {
 	return p.Connection
 }
 
@@ -500,7 +501,7 @@ func (p *peer) metricsReporter() {
 // ------------------------------------------------------------------
 // helper funcs
 
-func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) (Peer, error) {
+func wrapPeer(c abstract.Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) (Peer, error) {
 	persistent := false
 	if cfg.isPersistent != nil {
 		if cfg.outbound {

@@ -23,6 +23,7 @@ import (
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/libs/log"
 	cmtsync "github.com/cometbft/cometbft/libs/sync"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	"github.com/cometbft/cometbft/p2p/transport/tcp"
 	tcpconn "github.com/cometbft/cometbft/p2p/transport/tcp/conn"
@@ -693,7 +694,7 @@ func TestSwitchAcceptRoutine(t *testing.T) {
 		stream, err := c.OpenStream(testCh)
 		require.NoError(t, err)
 		// spawn a reading routine to prevent connection from closing
-		go func(s Stream) {
+		go func(s abstract.Stream) {
 			for {
 				one := make([]byte, 1)
 				_, err := stream.Read(one)
@@ -728,7 +729,7 @@ func TestSwitchAcceptRoutine(t *testing.T) {
 		stream, err := c.OpenStream(testCh)
 		require.NoError(t, err)
 		// spawn a reading routine to prevent connection from closing
-		go func(s Stream) {
+		go func(s abstract.Stream) {
 			for {
 				one := make([]byte, 1)
 				_, err := s.Read(one)
@@ -753,21 +754,21 @@ type errorTransport struct {
 	acceptErr error
 }
 
-var _ Transport = errorTransport{}
+var _ abstract.Transport = errorTransport{}
 
 func (errorTransport) NetAddr() na.NetAddr {
 	panic("not implemented")
 }
 
-func (et errorTransport) Accept() (Connection, *na.NetAddr, error) {
+func (et errorTransport) Accept() (abstract.Connection, *na.NetAddr, error) {
 	return nil, nil, et.acceptErr
 }
 
-func (errorTransport) Dial(na.NetAddr) (Connection, error) {
+func (errorTransport) Dial(na.NetAddr) (abstract.Connection, error) {
 	panic("not implemented")
 }
 
-func (errorTransport) Cleanup(Connection) error {
+func (errorTransport) Cleanup(abstract.Connection) error {
 	panic("not implemented")
 }
 

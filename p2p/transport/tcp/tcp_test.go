@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cometbft/cometbft/crypto/ed25519"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	"github.com/cometbft/cometbft/p2p/nodekey"
 	"github.com/cometbft/cometbft/p2p/transport/tcp/conn"
@@ -195,7 +196,7 @@ func TestTransportMultiplex_AcceptMultiple(t *testing.T) {
 		}
 	}
 
-	conns := []net.Conn{}
+	conns := []abstract.Connection{}
 
 	// Accept all connections.
 	for i := 0; i < cap(errc); i++ {

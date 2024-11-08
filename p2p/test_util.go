@@ -9,6 +9,7 @@ import (
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	cmtnet "github.com/cometbft/cometbft/internal/net"
 	"github.com/cometbft/cometbft/libs/log"
+	"github.com/cometbft/cometbft/p2p/abstract"
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
@@ -150,7 +151,7 @@ func ConnectStarSwitches(c int) func([]*Switch, int, int) {
 	}
 }
 
-func (sw *Switch) addPeerWithConnection(conn Connection) error {
+func (sw *Switch) addPeerWithConnection(conn abstract.Connection) error {
 	closeConn := func(err error) {
 		if cErr := conn.Close(err.Error()); cErr != nil {
 			sw.Logger.Error("Error closing connection", "err", cErr)
@@ -249,7 +250,7 @@ func MakeSwitch(
 }
 
 func testInboundPeerConn(
-	conn Connection,
+	conn abstract.Connection,
 	config *config.P2PConfig,
 	// ourNodePrivKey crypto.PrivKey,
 ) (peerConn, error) {
@@ -257,7 +258,7 @@ func testInboundPeerConn(
 }
 
 func testPeerConn(
-	rawConn Connection,
+	rawConn abstract.Connection,
 	cfg *config.P2PConfig,
 	outbound, persistent bool,
 	// _ourNodePrivKey crypto.PrivKey,
