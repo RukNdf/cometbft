@@ -336,8 +336,12 @@ func (p *peer) Status() any {
 // thread safe.
 func (p *peer) Send(e Envelope) bool {
 	streamID := e.ChannelID
-	p.streams[streamID].SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return p.send(e.ChannelID, e.Message, p.streams[streamID].Write)
+	stream, ok := p.streams[streamID]
+	if !ok {
+		panic(fmt.Sprintf("stream %d not found", streamID))
+	}
+	stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return p.send(e.ChannelID, e.Message, stream.Write)
 }
 
 // TrySend msg bytes to the channel identified by chID byte. Immediately returns
@@ -346,8 +350,12 @@ func (p *peer) Send(e Envelope) bool {
 // thread safe.
 func (p *peer) TrySend(e Envelope) bool {
 	streamID := e.ChannelID
-	p.streams[streamID].SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
-	return p.send(e.ChannelID, e.Message, p.streams[streamID].Write)
+	stream, ok := p.streams[streamID]
+	if !ok {
+		panic(fmt.Sprintf("stream %d not found", streamID))
+	}
+	stream.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	return p.send(e.ChannelID, e.Message, stream.Write)
 }
 
 func (p *peer) send(streamID byte, msg proto.Message, sendFunc func([]byte) (int, error)) bool {
@@ -424,7 +432,7 @@ func (p *peer) GetRemovalFailed() bool {
 
 // RemoteAddr returns peer's remote network address.
 func (p *peer) RemoteAddr() net.Addr {
-	return p.RemoteAddr()
+	return p.Connection.RemoteAddr()
 }
 
 // CanSend returns true if the send queue is not full, false otherwise.

@@ -198,7 +198,7 @@ func (rp *remoteTCPPeer) Dial(addr *na.NetAddr) (Connection, error) {
 		return nil, err
 	}
 
-	stream, err := pc.OpenStream(testCh)
+	stream, err := pc.OpenStream(handshakeStreamID)
 	if err != nil {
 		return nil, err
 	}
