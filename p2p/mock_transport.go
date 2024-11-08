@@ -32,7 +32,7 @@ type mockConnection struct {
 }
 
 func (c mockConnection) OpenStream(byte) (abstract.Stream, error) {
-	return c.Conn.(mockStream), nil
+	return mockStream(c), nil
 }
 
 func (c mockConnection) LocalAddr() net.Addr {
