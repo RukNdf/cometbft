@@ -294,8 +294,7 @@ func TestSwitchPeerFilter(t *testing.T) {
 			metrics:              sw.metrics,
 			outbound:             true,
 		},
-		rp.Addr(),
-		MConnConfig(sw.config))
+		rp.Addr())
 	require.NoError(t, err)
 
 	err = sw.addPeer(p)
@@ -351,8 +350,7 @@ func TestSwitchPeerFilterTimeout(t *testing.T) {
 			metrics:              sw.metrics,
 			outbound:             true,
 		},
-		rp.Addr(),
-		MConnConfig(sw.config))
+		rp.Addr())
 	require.NoError(t, err)
 
 	err = sw.addPeer(p)
@@ -390,8 +388,7 @@ func TestSwitchPeerFilterDuplicate(t *testing.T) {
 			metrics:              sw.metrics,
 			outbound:             true,
 		},
-		rp.Addr(),
-		MConnConfig(sw.config))
+		rp.Addr())
 	require.NoError(t, err)
 
 	if err := sw.addPeer(p); err != nil {
@@ -447,8 +444,7 @@ func TestSwitchStopsNonPersistentPeerOnError(t *testing.T) {
 			metrics:              sw.metrics,
 			outbound:             true,
 		},
-		rp.Addr(),
-		MConnConfig(sw.config))
+		rp.Addr())
 	require.NoError(err)
 
 	err = sw.addPeer(p)
@@ -697,7 +693,7 @@ func TestSwitchAcceptRoutine(t *testing.T) {
 		go func(s abstract.Stream) {
 			for {
 				one := make([]byte, 1)
-				_, err := stream.Read(one)
+				_, err := s.Read(one)
 				if err != nil {
 					return
 				}

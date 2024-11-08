@@ -29,7 +29,7 @@ func TestPeerBasic(t *testing.T) {
 	rp.Start()
 	defer rp.Stop()
 
-	p, err := createOutboundPeerAndPerformHandshake(t, rp.Addr(), cfg, tcpconn.DefaultMConnConfig())
+	p, err := createOutboundPeerAndPerformHandshake(t, rp.Addr(), cfg)
 	require.NoError(t, err)
 
 	err = p.Start()
@@ -58,7 +58,7 @@ func TestPeerSend(t *testing.T) {
 	rp.Start()
 	defer rp.Stop()
 
-	p, err := createOutboundPeerAndPerformHandshake(t, rp.Addr(), config, tcpconn.DefaultMConnConfig())
+	p, err := createOutboundPeerAndPerformHandshake(t, rp.Addr(), config)
 	require.NoError(t, err)
 
 	err = p.Start()
@@ -78,7 +78,6 @@ func createOutboundPeerAndPerformHandshake(
 	t *testing.T,
 	addr *na.NetAddr,
 	config *config.P2PConfig,
-	mConfig tcpconn.MConnConfig,
 ) (*peer, error) {
 	t.Helper()
 
@@ -114,7 +113,7 @@ func createOutboundPeerAndPerformHandshake(
 			},
 		}
 	)
-	p, err := newPeer(pc, mConfig, peerNodeInfo, streamInfoByStreamID, func(_ Peer, _ any) {})
+	p, err := newPeer(pc, peerNodeInfo, streamInfoByStreamID, func(_ Peer, _ any) {})
 	require.NoError(t, err)
 	p.SetLogger(log.TestingLogger().With("peer", addr))
 	return p, nil

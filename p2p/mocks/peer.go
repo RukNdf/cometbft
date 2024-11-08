@@ -4,7 +4,7 @@ package mocks
 
 import (
 	log "github.com/cometbft/cometbft/libs/log"
-	conn "github.com/cometbft/cometbft/p2p/transport/tcp/conn"
+	abstract "github.com/cometbft/cometbft/p2p/abstract"
 
 	mock "github.com/stretchr/testify/mock"
 
@@ -25,19 +25,19 @@ type Peer struct {
 }
 
 // Conn provides a mock function with given fields:
-func (_m *Peer) Conn() net.Conn {
+func (_m *Peer) Conn() abstract.Connection {
 	ret := _m.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Conn")
 	}
 
-	var r0 net.Conn
-	if rf, ok := ret.Get(0).(func() net.Conn); ok {
+	var r0 abstract.Connection
+	if rf, ok := ret.Get(0).(func() abstract.Connection); ok {
 		r0 = rf()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(net.Conn)
+			r0 = ret.Get(0).(abstract.Connection)
 		}
 	}
 
@@ -388,18 +388,20 @@ func (_m *Peer) Start() error {
 }
 
 // Status provides a mock function with given fields:
-func (_m *Peer) Status() conn.ConnectionStatus {
+func (_m *Peer) Status() any {
 	ret := _m.Called()
 
 	if len(ret) == 0 {
 		panic("no return value specified for Status")
 	}
 
-	var r0 conn.ConnectionStatus
-	if rf, ok := ret.Get(0).(func() conn.ConnectionStatus); ok {
+	var r0 any
+	if rf, ok := ret.Get(0).(func() any); ok {
 		r0 = rf()
 	} else {
-		r0 = ret.Get(0).(conn.ConnectionStatus)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(any)
+		}
 	}
 
 	return r0

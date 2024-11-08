@@ -383,8 +383,8 @@ func (mt *MultiplexTransport) upgrade(
 	}
 
 	// TODO: params
-	onReceive := func(chID byte, msgBytes []byte) {}
-	onError := func(r any) {}
+	onReceive := func(_ byte, _ []byte) {}
+	onError := func(_ any) {}
 
 	return conn.NewMConnectionWithConfig(
 		secretConn,

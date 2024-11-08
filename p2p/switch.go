@@ -703,8 +703,7 @@ func (sw *Switch) acceptRoutine() {
 				metrics:              sw.metrics,
 				outbound:             false,
 			},
-			addr,
-			MConnConfig(sw.config))
+			addr)
 		if err != nil {
 			sw.Logger.Info(
 				"Ignoring inbound connection: error while wrapping peer",
@@ -805,8 +804,7 @@ func (sw *Switch) addOutboundPeerWithConfig(
 			metrics:              sw.metrics,
 			outbound:             true,
 		},
-		addr,
-		MConnConfig(sw.config))
+		addr)
 	if err != nil {
 		_ = sw.transport.Cleanup(conn)
 		return err

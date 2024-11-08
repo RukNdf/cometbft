@@ -12,7 +12,7 @@ import (
 )
 
 type HandshakeStream interface {
-	SetDeadline(time.Time) error
+	SetDeadline(t time.Time) error
 	io.ReadWriter
 }
 

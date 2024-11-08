@@ -15,7 +15,6 @@ import (
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 	ni "github.com/cometbft/cometbft/p2p/nodeinfo"
 	"github.com/cometbft/cometbft/p2p/nodekey"
-	tcpconn "github.com/cometbft/cometbft/p2p/transport/tcp/conn"
 	"github.com/cometbft/cometbft/types"
 )
 
@@ -32,7 +31,6 @@ const metricsTickerDuration = 1 * time.Second
 // events.
 // TODO(xla): Refactor out with more static Reactor setup and PeerBehaviour.
 type peerConfig struct {
-	streamDescs []StreamDescriptor
 	onPeerError func(Peer, any)
 	outbound    bool
 	// isPersistent allows you to set a function, which, given socket address
@@ -162,7 +160,6 @@ type streamInfo struct {
 
 func newPeer(
 	pc peerConn,
-	mConfig tcpconn.MConnConfig,
 	nodeInfo ni.NodeInfo,
 	streamInfoByStreamID map[byte]streamInfo,
 	onPeerError func(Peer, any),
@@ -187,7 +184,7 @@ func newPeer(
 		p.streams[streamID] = stream
 	}
 
-	go p.readLoop(streamInfoByStreamID)
+	go p.readLoop(streamInfoByStreamID, onPeerError)
 
 	p.BaseService = *service.NewBaseService(nil, "Peer", p)
 	for _, option := range options {
@@ -197,7 +194,7 @@ func newPeer(
 	return p, nil
 }
 
-func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
+func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo, onPeerError func(Peer, any)) {
 	for {
 		select {
 		case <-p.Quit():
@@ -209,7 +206,7 @@ func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
 				n, err := stream.Read(buf)
 				if err != nil {
 					p.Logger.Error("Error reading from stream", "stream", streamID, "err", err)
-					p.Stop()
+					onPeerError(p, err)
 					return
 				}
 				if n == 0 {
@@ -221,7 +218,7 @@ func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
 				err = proto.Unmarshal(buf[:n], msg)
 				if err != nil {
 					p.Logger.Error("Error unmarshaling message", "as", reflect.TypeOf(msgType), "err", err)
-					p.Stop()
+					onPeerError(p, err)
 					return
 				}
 
@@ -229,7 +226,7 @@ func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
 					msg, err = w.Unwrap()
 					if err != nil {
 						p.Logger.Error("Error uwrapping message", "err", err)
-						p.Stop()
+						onPeerError(p, err)
 						return
 					}
 				}
@@ -341,7 +338,7 @@ func (p *peer) Send(e Envelope) bool {
 	if !ok {
 		panic(fmt.Sprintf("stream %d not found", streamID))
 	}
-	stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return p.send(e.ChannelID, e.Message, stream.Write)
 }
 
@@ -355,7 +352,7 @@ func (p *peer) TrySend(e Envelope) bool {
 	if !ok {
 		panic(fmt.Sprintf("stream %d not found", streamID))
 	}
-	stream.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	_ = stream.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 	return p.send(e.ChannelID, e.Message, stream.Write)
 }
 
@@ -501,7 +498,7 @@ func (p *peer) metricsReporter() {
 // ------------------------------------------------------------------
 // helper funcs
 
-func wrapPeer(c abstract.Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) (Peer, error) {
+func wrapPeer(c abstract.Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr) (Peer, error) {
 	persistent := false
 	if cfg.isPersistent != nil {
 		if cfg.outbound {
@@ -523,7 +520,6 @@ func wrapPeer(c abstract.Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr 
 
 	return newPeer(
 		peerConn,
-		mConfig,
 		ni,
 		cfg.streamInfoByStreamID,
 		cfg.onPeerError,

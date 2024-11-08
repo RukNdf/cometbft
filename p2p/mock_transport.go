@@ -31,8 +31,8 @@ type mockConnection struct {
 	net.Conn
 }
 
-func (c mockConnection) OpenStream(streamID byte) (abstract.Stream, error) {
-	return mockStream{Conn: c.Conn}, nil
+func (c mockConnection) OpenStream(byte) (abstract.Stream, error) {
+	return c.Conn.(mockStream), nil
 }
 
 func (c mockConnection) LocalAddr() net.Addr {
@@ -42,9 +42,9 @@ func (c mockConnection) LocalAddr() net.Addr {
 func (c mockConnection) RemoteAddr() net.Addr {
 	return c.Conn.RemoteAddr()
 }
-func (c mockConnection) Close(reason string) error         { return c.Conn.Close() }
-func (c mockConnection) FlushAndClose(reason string) error { return c.Conn.Close() }
-func (c mockConnection) ConnectionState() any              { return nil }
+func (c mockConnection) Close(string) error         { return c.Conn.Close() }
+func (c mockConnection) FlushAndClose(string) error { return c.Conn.Close() }
+func (mockConnection) ConnectionState() any         { return nil }
 
 var _ abstract.Transport = (*mockTransport)(nil)
 

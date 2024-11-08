@@ -340,7 +340,7 @@ func (c *MConnection) RemoteAddr() net.Addr {
 	return c.conn.RemoteAddr()
 }
 
-func (c *MConnection) OpenStream(streamID byte) (abstract.Stream, error) {
+func (c *MConnection) OpenStream(byte) (abstract.Stream, error) {
 	return MConnectionStream{c.conn}, nil
 }
 
@@ -350,7 +350,7 @@ func (c *MConnection) FlushAndClose(string) error {
 }
 
 func (c *MConnection) ConnectionState() any {
-	return nil
+	return c.Status()
 }
 
 func (c *MConnection) String() string {

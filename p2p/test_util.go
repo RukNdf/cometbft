@@ -179,7 +179,6 @@ func (sw *Switch) addPeerWithConnection(conn abstract.Connection) error {
 
 	p, err := newPeer(
 		pc,
-		MConnConfig(sw.config),
 		ni,
 		sw.streamInfoByStreamID,
 		sw.StopPeerForError,
@@ -268,10 +267,11 @@ func testPeerConn(
 
 	// Fuzz connection
 	// TODO: uncomment
-	// if cfg.TestFuzz {
-	// 	// so we have time to do peer handshakes and get set up
-	// 	conn = fuzz.ConnAfterFromConfig(conn, 10*time.Second, cfg.TestFuzzConfig)
-	// }
+	if cfg.TestFuzz {
+		fmt.Println("Fuzzing connection")
+		// 	// so we have time to do peer handshakes and get set up
+		// 	conn = fuzz.ConnAfterFromConfig(conn, 10*time.Second, cfg.TestFuzzConfig)
+	}
 
 	// Only the information we already have
 	return newPeerConn(outbound, persistent, conn, socketAddr), nil
