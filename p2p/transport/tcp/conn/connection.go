@@ -715,6 +715,10 @@ type ConnectionStatus struct {
 	Channels    []ChannelStatus
 }
 
+func (cs ConnectionStatus) ConnectedFor() time.Duration {
+	return cs.Duration
+}
+
 type ChannelStatus struct {
 	ID                byte
 	SendQueueCapacity int

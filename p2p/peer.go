@@ -248,10 +248,10 @@ func (p *peer) readLoop(streamInfoByStreamID map[byte]streamInfo) {
 // String representation.
 func (p *peer) String() string {
 	if p.outbound {
-		return fmt.Sprintf("Peer{%v %v out}", p, p.ID())
+		return fmt.Sprintf("Peer{%v %v out}", p.peerConn, p.ID())
 	}
 
-	return fmt.Sprintf("Peer{%v %v in}", p, p.ID())
+	return fmt.Sprintf("Peer{%v %v in}", p.peerConn, p.ID())
 }
 
 // ---------------------------------------------------

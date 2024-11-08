@@ -2,6 +2,7 @@ package mock
 
 import (
 	"net"
+	"time"
 
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/libs/service"
@@ -63,10 +64,10 @@ func (mp *Peer) NodeInfo() ni.NodeInfo {
 		ListenAddr:    mp.addr.DialString(),
 	}
 }
-func (*Peer) Status() conn.ConnectionStatus { return conn.ConnectionStatus{} }
-func (mp *Peer) ID() nodekey.ID             { return mp.id }
-func (mp *Peer) IsOutbound() bool           { return mp.Outbound }
-func (mp *Peer) IsPersistent() bool         { return mp.Persistent }
+func (*Peer) Status() any           { return conn.ConnectionStatus{} }
+func (mp *Peer) ID() nodekey.ID     { return mp.id }
+func (mp *Peer) IsOutbound() bool   { return mp.Outbound }
+func (mp *Peer) IsPersistent() bool { return mp.Persistent }
 func (mp *Peer) Get(key string) any {
 	if value, ok := mp.kv[key]; ok {
 		return value
@@ -80,6 +81,40 @@ func (mp *Peer) Set(key string, value any) {
 func (mp *Peer) RemoteIP() net.IP        { return mp.ip }
 func (mp *Peer) SocketAddr() *na.NetAddr { return mp.addr }
 func (mp *Peer) RemoteAddr() net.Addr    { return &net.TCPAddr{IP: mp.ip, Port: 8800} }
-func (mp *Peer) Conn() net.Conn          { return mp.server }
+func (mp *Peer) Conn() p2p.Connection    { return mockConnection{mp.server} }
 func (*Peer) SetRemovalFailed()          {}
 func (*Peer) GetRemovalFailed() bool     { return false }
+
+type mockStream struct {
+	net.Conn
+}
+
+func (s mockStream) Read(b []byte) (n int, err error) {
+	return s.Conn.Read(b)
+}
+func (s mockStream) Write(b []byte) (n int, err error) {
+	return s.Conn.Write(b)
+}
+func (mockStream) Close() error {
+	return nil
+}
+func (s mockStream) SetDeadline(t time.Time) error      { return s.Conn.SetReadDeadline(t) }
+func (s mockStream) SetReadDeadline(t time.Time) error  { return s.Conn.SetReadDeadline(t) }
+func (s mockStream) SetWriteDeadline(t time.Time) error { return s.Conn.SetWriteDeadline(t) }
+
+type mockConnection struct {
+	net.Conn
+}
+
+func (c mockConnection) OpenStream(streamID byte) (p2p.Stream, error) {
+	return mockStream{Conn: c.Conn}, nil
+}
+func (c mockConnection) LocalAddr() net.Addr {
+	return c.Conn.LocalAddr()
+}
+func (c mockConnection) RemoteAddr() net.Addr {
+	return c.Conn.RemoteAddr()
+}
+func (c mockConnection) Close(reason string) error         { return c.Conn.Close() }
+func (c mockConnection) FlushAndClose(reason string) error { return c.Conn.Close() }
+func (c mockConnection) ConnectionState() any              { return nil }

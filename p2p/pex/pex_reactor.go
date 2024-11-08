@@ -730,10 +730,15 @@ func (r *Reactor) cleanupCrawlPeerInfos() {
 	}
 }
 
+type durationStatus interface {
+	ConnectedFor() time.Duration
+}
+
 // attemptDisconnects checks if we've been with each peer long enough to disconnect.
 func (r *Reactor) attemptDisconnects() {
 	for _, peer := range r.Switch.Peers().Copy() {
-		if peer.Status().Duration < r.config.SeedDisconnectWaitPeriod {
+		status := peer.Status().(durationStatus)
+		if status.ConnectedFor() < r.config.SeedDisconnectWaitPeriod {
 			continue
 		}
 		if peer.IsPersistent() {
