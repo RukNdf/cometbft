@@ -30,7 +30,7 @@ type IPResolver interface {
 // asynchronously running routine to the Accept method.
 type accept struct {
 	netAddr *na.NetAddr
-	conn    net.Conn
+	conn    *conn.MConnection
 	err     error
 }
 
@@ -150,7 +150,7 @@ func (mt *MultiplexTransport) NetAddr() na.NetAddr {
 }
 
 // Accept implements Transport.
-func (mt *MultiplexTransport) Accept() (net.Conn, *na.NetAddr, error) {
+func (mt *MultiplexTransport) Accept() (*conn.MConnection, *na.NetAddr, error) {
 	select {
 	// This case should never have any side-effectful/blocking operations to
 	// ensure that quality peers are ready to be used.
@@ -168,9 +168,7 @@ func (mt *MultiplexTransport) Accept() (net.Conn, *na.NetAddr, error) {
 }
 
 // Dial implements Transport.
-func (mt *MultiplexTransport) Dial(
-	addr na.NetAddr,
-) (net.Conn, error) {
+func (mt *MultiplexTransport) Dial(addr na.NetAddr) (*conn.MConnection, error) {
 	c, err := addr.DialTimeout(mt.dialTimeout)
 	if err != nil {
 		return nil, err
@@ -186,12 +184,12 @@ func (mt *MultiplexTransport) Dial(
 		return nil, err
 	}
 
-	secretConn, err := mt.upgrade(c, &addr)
+	mconn, _, err := mt.upgrade(c, &addr)
 	if err != nil {
 		return nil, err
 	}
 
-	return secretConn, nil
+	return mconn, nil
 }
 
 // Close implements transportLifecycle.
@@ -266,22 +264,23 @@ func (mt *MultiplexTransport) acceptPeers() {
 			}()
 
 			var (
-				secretConn *conn.SecretConnection
-				netAddr    *na.NetAddr
+				mconn        *conn.MConnection
+				remotePubKey crypto.PubKey
+				netAddr      *na.NetAddr
 			)
 
 			err := mt.filterConn(c)
 			if err == nil {
-				secretConn, err = mt.upgrade(c, nil)
+				mconn, remotePubKey, err = mt.upgrade(c, nil)
 				if err == nil {
 					addr := c.RemoteAddr()
-					id := nodekey.PubKeyToID(secretConn.RemotePubKey())
+					id := nodekey.PubKeyToID(remotePubKey)
 					netAddr = na.New(id, addr)
 				}
 			}
 
 			select {
-			case mt.acceptc <- accept{netAddr, secretConn, err}:
+			case mt.acceptc <- accept{netAddr, mconn, err}:
 				// Make the upgraded peer available.
 			case <-mt.closec:
 				// Give up if the transport was closed.
@@ -344,16 +343,17 @@ func (mt *MultiplexTransport) filterConn(c net.Conn) (err error) {
 func (mt *MultiplexTransport) upgrade(
 	c net.Conn,
 	dialedAddr *na.NetAddr,
-) (secretConn *conn.SecretConnection, err error) {
+) (*conn.MConnection, crypto.PubKey, error) {
+	var err error
 	defer func() {
 		if err != nil {
 			_ = mt.Cleanup(c)
 		}
 	}()
 
-	secretConn, err = upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
+	secretConn, err := upgradeSecretConn(c, mt.handshakeTimeout, mt.nodeKey.PrivKey)
 	if err != nil {
-		return nil, ErrRejected{
+		return nil, nil, ErrRejected{
 			conn:          c,
 			err:           fmt.Errorf("secret conn failed: %w", err),
 			isAuthFailure: true,
@@ -361,10 +361,11 @@ func (mt *MultiplexTransport) upgrade(
 	}
 
 	// For outgoing conns, ensure connection key matches dialed key.
-	connID := nodekey.PubKeyToID(secretConn.RemotePubKey())
+	remotePubKey := secretConn.RemotePubKey()
+	connID := nodekey.PubKeyToID(remotePubKey)
 	if dialedAddr != nil {
 		if dialedID := dialedAddr.ID; connID != dialedID {
-			return nil, ErrRejected{
+			return nil, nil, ErrRejected{
 				conn: c,
 				id:   connID,
 				err: fmt.Errorf(
@@ -377,17 +378,17 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
-	// p.mconn = createMConnection(
-	// 	pc.conn,
-	// 	p,
-	// 	reactorsByCh,
-	// 	msgTypeByChID,
-	// 	streams,
-	// 	onPeerError,
-	// 	mConfig,
-	// )
+	// TODO: params
+	onReceive := func(chID byte, msgBytes []byte) {}
+	onError := func(r any) {}
 
-	return secretConn, nil
+	return conn.NewMConnectionWithConfig(
+		secretConn,
+		[]*conn.ChannelDescriptor{},
+		onReceive,
+		onError,
+		conn.MConnConfig{},
+	), remotePubKey, nil
 }
 
 func upgradeSecretConn(

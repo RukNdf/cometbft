@@ -500,42 +500,6 @@ func (p *peer) metricsReporter() {
 // ------------------------------------------------------------------
 // helper funcs
 
-func createMConnection(
-	conn net.Conn,
-	p *peer,
-	reactorsByStreamID map[byte]Reactor,
-	msgTypeByStreamID map[byte]proto.Message,
-	streamDescs []StreamDescriptor,
-	onPeerError func(Peer, any),
-	config tcpconn.MConnConfig,
-) *tcpconn.MConnection {
-	onReceive := func(chID byte, msgBytes []byte) {
-	}
-
-	onError := func(r any) {
-		onPeerError(p, r)
-	}
-
-	// filter out non-tcpconn.ChannelDescriptor streams
-	tcpDescs := make([]*tcpconn.ChannelDescriptor, 0, len(streamDescs))
-	for _, stream := range streamDescs {
-		var ok bool
-		d, ok := stream.(*tcpconn.ChannelDescriptor)
-		if !ok {
-			continue
-		}
-		tcpDescs = append(tcpDescs, d)
-	}
-
-	return tcpconn.NewMConnectionWithConfig(
-		conn,
-		tcpDescs,
-		onReceive,
-		onError,
-		config,
-	)
-}
-
 func wrapPeer(c Connection, ni ni.NodeInfo, cfg peerConfig, socketAddr *na.NetAddr, mConfig tcpconn.MConnConfig) (Peer, error) {
 	persistent := false
 	if cfg.isPersistent != nil {
