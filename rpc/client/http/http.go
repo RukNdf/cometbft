@@ -659,6 +659,7 @@ func (w *WSEvents) Subscribe(ctx context.Context, _, query string,
 		return nil, errNotRunning
 	}
 
+	w.Logger.Info("WS Query", "query", query)
 	if err := w.ws.Subscribe(ctx, query); err != nil {
 		return nil, err
 	}
@@ -745,11 +746,13 @@ func (w *WSEvents) eventListener() {
 		select {
 		case resp, ok := <-w.ws.ResponsesCh:
 			if !ok {
+				w.Logger.Error("WS error response channel nok", "err", resp)
 				return
 			}
 
 			if resp.Error != nil {
 				w.Logger.Error("WS error", "err", resp.Error.Error())
+				w.Logger.Error("WS error", "err", resp)
 				// Error can be ErrAlreadySubscribed or max client (subscriptions per
 				// client) reached or CometBFT exited.
 				// We can ignore ErrAlreadySubscribed, but need to retry in other

@@ -126,6 +126,7 @@ func NewCLI() *CLI {
 			chLoadResult := make(chan error)
 			ctx, loadCancel := context.WithCancel(context.Background())
 			defer loadCancel()
+
 			go func() {
 				err := Load(ctx, cli.testnet, false)
 				if err != nil {
@@ -141,6 +142,12 @@ func NewCLI() *CLI {
 			if err := Wait(cmd.Context(), cli.testnet, 5); err != nil { // allow some txs to go through
 				return err
 			}
+
+			go func() {
+				if err := Report(ctx, cli.testnet, false); err != nil {
+					chLoadResult <- err
+				}
+			}()
 
 			if cli.testnet.HasPerturbations() {
 				if err := Perturb(cmd.Context(), cli.testnet, cli.infp); err != nil {
@@ -375,7 +382,7 @@ func NewCLI() *CLI {
 	Min Block Interval
 	Max Block Interval
 over a 100 block sampling period.
-		
+
 Does not run any perturbations.
 		`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
