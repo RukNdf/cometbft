@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gorilla/websocket"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
+	"crypto/rand"
 	"github.com/cometbft/cometbft/libs/log"
 	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
 	e2e "github.com/cometbft/cometbft/test/e2e/pkg"
@@ -17,6 +20,16 @@ import (
 )
 
 const workerPoolSize = 16
+
+// TODO add to toml
+var window = 1
+
+// IdTx is a Tx transaction bundled with its 16 byte identifier.
+// The identifier is used to map the pending transactions to differ new commits from duplicates.
+type IdTx struct {
+	tx types.Tx
+	id int16
+}
 
 // Load generates transactions against the network until the given context is
 // canceled.
@@ -28,12 +41,23 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	//generate a random byte
+	c := make([]byte, 1)
+	rand.Read(c)
+	// This client's 1 byte id, used to make the tx ids.
+	// Only one byte is used to simplify the processing during normal testing conditions but more could be used if necessary.
+	clientId := c[0]
+
 	logger.Info("load", "msg", log.NewLazySprintf("Starting transaction load (%v workers)...", workerPoolSize))
 	started := time.Now()
-	u := [16]byte(uuid.New()) // generate run ID on startup
 
-	txCh := make(chan types.Tx)
-	go loadGenerate(ctx, txCh, testnet, u[:])
+	// windowCh is used to limit the number of pending transactions
+	windowCh := make(chan struct{}, window)
+	// Map the pending transactions to differentiate new commits from duplicated commits.
+	pendingMap := make(map[int16]bool)
+	txCh := make(chan IdTx)
+	go loadGenerate(ctx, txCh, testnet, clientId)
+	go monitorBlocks(ctx, windowCh, pendingMap, clientId)
 
 	for _, n := range testnet.Nodes {
 		if n.SendNoLoad {
@@ -41,7 +65,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 		}
 
 		for w := 0; w < testnet.LoadTxConnections; w++ {
-			go loadProcess(ctx, txCh, chSuccess, chFailed, n, useInternalIP)
+			go loadProcess(ctx, txCh, chSuccess, chFailed, n, useInternalIP, windowCh, pendingMap)
 		}
 	}
 
@@ -95,7 +119,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 }
 
 // loadGenerate generates jobs until the context is canceled.
-func loadGenerate(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testnet, id []byte) {
+func loadGenerate(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, clientId byte) {
 	t := time.NewTimer(0)
 	defer t.Stop()
 	for {
@@ -112,15 +136,36 @@ func loadGenerate(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testne
 		// the next batch is set to be sent out, then the context is canceled so that
 		// the current batch is halted, allowing the next batch to begin.
 		tctx, cf := context.WithTimeout(ctx, time.Second)
-		createTxBatch(tctx, txCh, testnet, id)
+		createTxBatch(tctx, txCh, testnet, clientId)
 		cf()
 	}
+}
+
+// Transaction id.
+// 2 bytes is enough for 65k transactions but more could be added if necessary.
+var loadIDCounter = int16(0)
+var loadIDSemaphore = make(chan struct{}, 1)
+
+// Generates an ID for the transaction.
+// Load_window uses 1 byte to identify the client, 2 bytes for the transaction.
+func generateId(clientId byte) ([]byte, int16) {
+	// Block channel as the tx generator is multithreaded
+	loadIDSemaphore <- struct{}{}
+	txNum := loadIDCounter
+	loadIDCounter++
+	<-loadIDSemaphore
+
+	// Generate an ID in the format client - tx num.
+	// Tx num uses two bytes to allow for more transactions without an overflow.
+	id := []byte{clientId, byte(txNum >> 8), byte(txNum)}
+
+	return id, txNum
 }
 
 // createTxBatch creates new transactions and sends them into the txCh. createTxBatch
 // returns when either a full batch has been sent to the txCh or the context
 // is canceled.
-func createTxBatch(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testnet, id []byte) {
+func createTxBatch(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, clientId byte) {
 	wg := &sync.WaitGroup{}
 	genCh := make(chan struct{})
 	for i := 0; i < workerPoolSize; i++ {
@@ -128,8 +173,9 @@ func createTxBatch(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testn
 		go func() {
 			defer wg.Done()
 			for range genCh {
+				txId, txNum := generateId(clientId)
 				tx, err := payload.NewBytes(&payload.Payload{
-					Id:          id,
+					Id:          txId,
 					Size:        uint64(testnet.LoadTxSizeBytes),
 					Rate:        uint64(testnet.LoadTxBatchSize),
 					Connections: uint64(testnet.LoadTxConnections),
@@ -139,7 +185,7 @@ func createTxBatch(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testn
 				}
 
 				select {
-				case txCh <- tx:
+				case txCh <- IdTx{tx, txNum}:
 				case <-ctx.Done():
 					return
 				}
@@ -158,11 +204,14 @@ func createTxBatch(ctx context.Context, txCh chan<- types.Tx, testnet *e2e.Testn
 
 // loadProcess processes transactions by sending transactions received on the txCh
 // to the client.
-func loadProcess(ctx context.Context, txCh <-chan types.Tx, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool) {
+func loadProcess(ctx context.Context, txCh <-chan IdTx, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool, windowCh chan struct{}, pendingMap map[int16]bool) {
 	var client *rpchttp.HTTP
 	var err error
 	s := struct{}{}
-	for tx := range txCh {
+	for t := range txCh {
+
+		tx := t.tx
+		txNum := t.id
 		if client == nil {
 			if useInternalIP {
 				client, err = n.ClientInternalIP()
@@ -174,10 +223,217 @@ func loadProcess(ctx context.Context, txCh <-chan types.Tx, chSuccess chan<- str
 				continue
 			}
 		}
+		// Take one window slot per transaction, block if none is available
+		windowCh <- struct{}{}
 		if _, err = client.BroadcastTxSync(ctx, tx); err != nil {
+			// Free one slot on failure
+			<-windowCh
 			chFailed <- err
 			continue
 		}
+		pendingMap[txNum] = true
 		chSuccess <- s
+	}
+}
+
+func milliToSeconds(m int) float32 {
+	return float32(m) / 1000
+}
+
+// calculateStatistics receives a list of time differences (in milliseconds) and returns a minimum, average, and maximum (in seconds) and the number of transactions.
+func calculateStatistics(times []int64) (float32, float32, float32, int) {
+	num := len(times)
+	// No transactions
+	if num == 0 {
+		return 0, 0, 0, 0
+	}
+
+	sum := 0
+	minT := int(times[0])
+	maxT := minT
+	for _, t64 := range times {
+		t := int(t64)
+		sum += t
+		if t < minT {
+			minT = t
+		} else {
+			if t > maxT {
+				maxT = t
+			}
+		}
+	}
+
+	return milliToSeconds(minT), milliToSeconds(sum) / float32(num), milliToSeconds(maxT), num
+}
+
+/* TODO fix query and use the internal WS client
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte) {
+	var subscription *rpchttp.WSEvents
+	//query := `{"jsonrpc":"2.0","method":"subscribe","params":["tm.event='NewBlock'"],"id":"1"}`
+	query := "'{ \"jsonrpc\": \"2.0\",\"method\": \"subscribe\",\"id\": 0,\"params\": {\"query\": \"tm.event='\"'NewBlock'\"'\"} }'"
+	s, err := subscription.Subscribe(ctx, "", query, 10)
+	if err != nil {
+		logger.Info("error when creating a subscription", "error", err)
+		return
+	}
+
+	for block := range s {
+		// Time in milliseconds (as int64). More bytes than necessary but it's possibly faster than other methods in this case.
+		//rcvTime := time.Now().UnixMilli()
+		var txs = block.Data
+		logger.Info("load", "msg", log.NewLazySprintf("---- %+v", txs))
+
+
+			//txs := t.Block.data.Txs
+
+			// List of round trip times in this block
+			times := make([]int64, 0, len(txs))
+
+			for _, tx := range txs {
+				tx, err := payload.FromBytes(tx)
+				if err != nil {
+					// Prefix error means it encountered a tx that wasn't submitted by this client and thus can be ignored
+					if !strings.Contains(err.Error(), "key prefix") {
+						logger.Info("error when reading a transaction", "error", err)
+					}
+					continue
+				}
+
+				id := tx.Id
+				// Ignore transactions from other clients
+				if id[0] == clientId {
+					var txNum int16 = (int16(id[1]) << 8) + int16(id[2])
+					// Ignore non-pending transactions (e.g. duplicates)
+					if pendingMap[txNum] {
+						// Deletes the key to save memory.
+						// Simply changing the key's value to false might be faster if this function is too slow.
+						delete(pendingMap, txNum)
+
+						// Free a slot for a new tx.
+						<-windowCh
+
+						t := rcvTime - tx.Time.AsTime().UnixMilli()
+						times = append(times, t)
+					}
+				}
+
+			}
+
+			minT, avgrT, maxT, numT := calculateStatistics(times)
+
+			logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avgrT, maxT, numT, len(txs)))
+
+
+	}
+
+}*/
+
+/*
+*  TODO TEMPORARY
+ */
+
+type NewBlockSubscription struct {
+	Jsonrpc string `json:"jsonrpc"`
+	Id      string `json:"id"`
+	Result  struct {
+		Query string `json:"query"`
+		Data  struct {
+			Type  string `json:"type"`
+			Value struct {
+				Block struct {
+					Header struct {
+						Height string `json:"height"`
+						Time   string `json:"time"`
+					} `json:"header"`
+					Data struct {
+						Txs []string `json:"txs"`
+					} `json:"data"`
+				} `json:"block"`
+			} `json:"value"`
+		} `json:"data"`
+	} `json:"result"`
+}
+
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte) {
+	subscribeRequest := `{"jsonrpc":"2.0","method":"subscribe","params":["tm.event='NewBlock'"],"id":"1"}`
+	c, _, err := websocket.DefaultDialer.Dial("ws://localhost:5701/websocket", nil)
+	if err != nil {
+		logger.Info("error when creating a subscription", "error", err)
+		return
+	}
+	defer c.Close()
+
+	err = c.WriteMessage(websocket.TextMessage, []byte(subscribeRequest))
+	if err != nil {
+		logger.Info("error when creating a subscription", "error", err)
+		return
+	}
+
+	for {
+		_, message, err := c.ReadMessage()
+		if err != nil {
+			logger.Info("error when creating a subscription", "error", err)
+			return
+		}
+
+		// Time in milliseconds (as int64). More bytes than necessary but it's possibly faster than other methods in this case.
+		rcvTime := time.Now().UnixMilli()
+
+		var NewBlock NewBlockSubscription
+		err = json.Unmarshal(message, &NewBlock)
+		if err != nil {
+			logger.Info("error when reading a subscription", "error", err)
+			continue
+		}
+
+		numTxs := len(NewBlock.Result.Data.Value.Block.Data.Txs)
+		if numTxs == 0 {
+			continue
+		}
+
+		// List of round trip times in this block
+		times := make([]int64, 0, numTxs)
+
+		for _, txStr := range NewBlock.Result.Data.Value.Block.Data.Txs {
+
+			data, err := base64.StdEncoding.DecodeString(txStr)
+			if err != nil {
+				logger.Info("error when reading a transaction", "error", err)
+				continue
+			}
+
+			tx, err := payload.FromBytes(data)
+
+			if err != nil {
+				// Prefix error means it encountered a tx that wasn't submitted by this client and thus can be ignored
+				if !strings.Contains(err.Error(), "key prefix") {
+					logger.Info("error when reading a transaction", "error", err)
+				}
+				continue
+			}
+
+			id := tx.Id
+			// Ignore transactions from other clients
+			if id[0] == clientId {
+				var txNum int16 = (int16(id[1]) << 8) + int16(id[2])
+				// Ignore non-pending transactions (e.g. duplicates)
+				if pendingMap[txNum] {
+					// Deletes the key to save memory.
+					// Simply changing the key's value to false might be faster if this function is too slow.
+					delete(pendingMap, txNum)
+
+					// Free a slot for a new tx.
+					<-windowCh
+
+					t := rcvTime - tx.Time.AsTime().UnixMilli()
+					times = append(times, t)
+				}
+			}
+
+		}
+
+		minT, avgrT, maxT, numT := calculateStatistics(times)
+
+		logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avgrT, maxT, numT, numTxs))
 	}
 }
