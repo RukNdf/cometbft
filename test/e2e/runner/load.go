@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"strings"
 
 	//"encoding/base64"
@@ -26,10 +27,10 @@ const workerPoolSize = 16
 // TODO add to toml
 var window = 5
 
-// IdTx is a Tx transaction bundled with its 16 byte identifier.
+// IdPayload is a payload object bundled with its 2 byte identifier in int16 form.
 // The identifier is used to map the pending transactions to differ new commits from duplicates.
-type IdTx struct {
-	tx types.Tx
+type IdPayload struct {
+	p  payload.Payload
 	id int16
 }
 
@@ -57,7 +58,8 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	windowCh := make(chan struct{}, window)
 	// Map the pending transactions to differentiate new commits from duplicated commits.
 	pendingMap := make(map[int16]bool)
-	txCh := make(chan IdTx)
+	// channel between the tx generator and the client function, with buffer size of 1.5x the window
+	txCh := make(chan IdPayload, int((3*window)/2))
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
 	go monitorBlocks(ctx, windowCh, pendingMap, clientId, createClient(testnet.Nodes[0], useInternalIP))
@@ -67,7 +69,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 			continue
 		}
 
-		for w := 0; w < testnet.LoadTxConnections; w++ {
+		for w := 0; w < window; w++ {
 			go loadProcess(ctx, txCh, chSuccess, chFailed, n, useInternalIP, windowCh, pendingMap)
 		}
 	}
@@ -122,7 +124,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 }
 
 // loadGenerate generates jobs until the context is canceled.
-func loadGenerate(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, clientId byte) {
+func loadGenerate(ctx context.Context, txCh chan<- IdPayload, testnet *e2e.Testnet, clientId byte) {
 	t := time.NewTimer(0)
 	defer t.Stop()
 	for {
@@ -168,7 +170,7 @@ func generateId(clientId byte) ([]byte, int16) {
 // createTxBatch creates new transactions and sends them into the txCh. createTxBatch
 // returns when either a full batch has been sent to the txCh or the context
 // is canceled.
-func createTxBatch(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, clientId byte) {
+func createTxBatch(ctx context.Context, txCh chan<- IdPayload, testnet *e2e.Testnet, clientId byte) {
 	wg := &sync.WaitGroup{}
 	genCh := make(chan struct{})
 	for i := 0; i < workerPoolSize; i++ {
@@ -177,18 +179,15 @@ func createTxBatch(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, 
 			defer wg.Done()
 			for range genCh {
 				txId, txNum := generateId(clientId)
-				tx, err := payload.NewBytes(&payload.Payload{
+				p := payload.Payload{
 					Id:          txId,
 					Size:        uint64(testnet.LoadTxSizeBytes),
 					Rate:        uint64(testnet.LoadTxBatchSize),
 					Connections: uint64(testnet.LoadTxConnections),
-				})
-				if err != nil {
-					panic(fmt.Sprintf("Failed to generate tx: %v", err))
 				}
 
 				select {
-				case txCh <- IdTx{tx, txNum}:
+				case txCh <- IdPayload{p, txNum}:
 				case <-ctx.Done():
 					return
 				}
@@ -207,13 +206,13 @@ func createTxBatch(ctx context.Context, txCh chan<- IdTx, testnet *e2e.Testnet, 
 
 // loadProcess processes transactions by sending transactions received on the txCh
 // to the client.
-func loadProcess(ctx context.Context, txCh <-chan IdTx, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool, windowCh chan struct{}, pendingMap map[int16]bool) {
+func loadProcess(ctx context.Context, txCh <-chan IdPayload, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool, windowCh chan struct{}, pendingMap map[int16]bool) {
 	var client *rpchttp.HTTP
 	var err error
 	s := struct{}{}
 	for t := range txCh {
 
-		tx := t.tx
+		p := t.p
 		txNum := t.id
 		if client == nil {
 			if useInternalIP {
@@ -228,6 +227,16 @@ func loadProcess(ctx context.Context, txCh <-chan IdTx, chSuccess chan<- struct{
 		}
 		// Take one window slot per transaction, block if none is available
 		windowCh <- struct{}{}
+		// update time,
+		p.Time = timestamppb.New(time.Now())
+		// encode,
+		tx, err := payload.NewBytes(&p)
+		if err != nil {
+			<-windowCh
+			logger.Info("Failed to generate tx:", "error", err)
+			continue
+		}
+		// and send
 		if _, err = client.BroadcastTxSync(ctx, tx); err != nil {
 			// Free one slot on failure
 			<-windowCh
