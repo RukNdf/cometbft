@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"os"
+	"path/filepath"
 	"strings"
 
 	//"encoding/base64"
@@ -25,7 +28,8 @@ import (
 const workerPoolSize = 16
 
 // TODO add to toml
-var window = 5
+var window = 10
+var windowReportTimer = 100 * time.Millisecond
 
 // IdPayload is a payload object bundled with its 2 byte identifier in int16 form.
 // The identifier is used to map the pending transactions to differ new commits from duplicates.
@@ -46,7 +50,10 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 
 	//generate a random byte
 	c := make([]byte, 1)
-	rand.Read(c)
+	_, err := rand.Read(c)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to generate client byte: %v", err))
+	}
 	// This client's 1 byte id, used to make the tx ids.
 	// Only one byte is used to simplify the processing during normal testing conditions but more could be used if necessary.
 	clientId := c[0]
@@ -60,6 +67,11 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	pendingMap := make(map[int16]bool)
 	// channel between the tx generator and the client function, with buffer size of 1.5x the window
 	txCh := make(chan IdPayload, int((3*window)/2))
+	// Signals to stop the window report thread.
+	stopReport := make(chan struct{})
+	windowConfirm := make(chan struct{})
+	go windowReporter(stopReport, windowConfirm, windowCh, pendingMap, txCh)
+	defer stopWindowReport(stopReport, windowConfirm)
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
 	go monitorBlocks(ctx, windowCh, pendingMap, clientId, createClient(testnet.Nodes[0], useInternalIP))
@@ -228,7 +240,7 @@ func loadProcess(ctx context.Context, txCh <-chan IdPayload, chSuccess chan<- st
 		// Take one window slot per transaction, block if none is available
 		windowCh <- struct{}{}
 		// update time,
-		p.Time = timestamppb.New(time.Now())
+		p.Time = timestamppb.Now()
 		// encode,
 		tx, err := payload.NewBytes(&p)
 		if err != nil {
@@ -362,4 +374,54 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[i
 
 	}
 
+}
+
+// windowReporter logs the current state of the application to the window-report.txt file.
+// Each line has a timestamp, the current state of the window channel, and an estimate of the pending map.
+// Pending map does not need any sort of control structure which could result in an error of a few transactions during the logging.
+// A semaphore could be implemented but would likely affect performance.
+// Its expected that the window channel will "always" be full and the pending map expecting an equal number of transactions.
+// Any fewer means that either the client can't keep up or, if the number of transactions is too big, that the network or the mempool can't handle the load.
+func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, pendingMap map[int16]bool, txCh chan IdPayload) {
+	// Create log file
+	logger.Info("Starting window report generation")
+	txFilePath := filepath.Join("networks", "logs", "window-log.txt")
+	txFile, err := os.Create(txFilePath)
+	if err != nil {
+		logger.Info("Error creating window log file", "error", err)
+		return
+	}
+	defer txFile.Close()
+	txWriter := bufio.NewWriter(txFile)
+	defer txWriter.Flush()
+
+	// Constants
+	windowSize := window
+	txSize := cap(txCh)
+
+	// Periodically pool data and write to log file
+	for {
+		// Wait for the shutdown signal or for the timer to end.
+		// time.After is necessary as time.Sleep can't be interrupted while it's sleeping.
+		select {
+		case <-stopReport:
+			stopReport <- struct{}{}
+			return
+		case <-time.After(windowReportTimer):
+			t := time.Now().UTC()
+			chLen := len(windowCh)
+			mapLen := len(pendingMap)
+			txLen := len(txCh)
+			_, err = txWriter.WriteString(fmt.Sprintf("%s - %d out of %d window slots used. %d transactions pending. %d transactions generated out of %d.\n", t, chLen, windowSize, mapLen, txLen, txSize))
+			if err != nil {
+				logger.Info("error writing to window log file", "error", err)
+			}
+		}
+	}
+}
+
+// tries to stop windowReport and awaits confirmation
+func stopWindowReport(stopReport chan struct{}, reportConfirm chan struct{}) {
+	stopReport <- struct{}{}
+	<-reportConfirm
 }
