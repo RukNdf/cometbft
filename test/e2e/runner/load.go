@@ -28,7 +28,7 @@ import (
 const workerPoolSize = 16
 
 // TODO add to toml
-var window = 10
+var window = 900
 var windowReportTimer = 100 * time.Millisecond
 
 // IdPayload is a payload object bundled with its 2 byte identifier in int16 form.
@@ -64,13 +64,13 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	// windowCh is used to limit the number of pending transactions
 	windowCh := make(chan struct{}, window)
 	// Map the pending transactions to differentiate new commits from duplicated commits.
-	pendingMap := make(map[int16]bool)
+	pendingMap := new(sync.Map)
 	// channel between the tx generator and the client function, with buffer size of 1.5x the window
 	txCh := make(chan IdPayload, int((3*window)/2))
 	// Signals to stop the window report thread.
 	stopReport := make(chan struct{})
 	windowConfirm := make(chan struct{})
-	go windowReporter(stopReport, windowConfirm, windowCh, pendingMap, txCh)
+	go windowReporter(stopReport, windowConfirm, windowCh, txCh)
 	defer stopWindowReport(stopReport, windowConfirm)
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
@@ -218,7 +218,7 @@ func createTxBatch(ctx context.Context, txCh chan<- IdPayload, testnet *e2e.Test
 
 // loadProcess processes transactions by sending transactions received on the txCh
 // to the client.
-func loadProcess(ctx context.Context, txCh <-chan IdPayload, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool, windowCh chan struct{}, pendingMap map[int16]bool) {
+func loadProcess(ctx context.Context, txCh <-chan IdPayload, chSuccess chan<- struct{}, chFailed chan<- error, n *e2e.Node, useInternalIP bool, windowCh chan struct{}, pendingMap *sync.Map) {
 	var client *rpchttp.HTTP
 	var err error
 	s := struct{}{}
@@ -255,7 +255,7 @@ func loadProcess(ctx context.Context, txCh <-chan IdPayload, chSuccess chan<- st
 			chFailed <- err
 			continue
 		}
-		pendingMap[txNum] = true
+		pendingMap.Store(txNum, true)
 		chSuccess <- s
 	}
 }
@@ -312,7 +312,7 @@ func createClient(n *e2e.Node, useInternalIP bool) *rpchttp.HTTP {
 
 // monitorBlocks uses a ws subscription to receive new blocks and verify which transactions have been commited.
 // As new transactions come the pending window gets updated and the latency of the transactions is calculated.
-func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte, client *rpchttp.HTTP) {
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync.Map, clientId byte, client *rpchttp.HTTP) {
 	//Create a subscription channel from the client to receive new blocks
 	query := `tm.event='NewBlock'`
 	s, err := client.Subscribe(ctx, "", query, 10)
@@ -353,11 +353,9 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[i
 			if id[0] == clientId {
 				var txNum int16 = (int16(id[1]) << 8) + int16(id[2])
 				// Ignore non-pending transactions (e.g. duplicates)
-				if pendingMap[txNum] {
-					// Deletes the key to save memory.
-					// Simply changing the key's value to false might be faster if this function is too slow.
-					delete(pendingMap, txNum)
-
+				// CompareAndDelete removes the key from the map to save memory
+				// and only returns true if txNum was a pending transaction.
+				if pendingMap.CompareAndDelete(txNum, true) {
 					// Free a slot for a new tx.
 					<-windowCh
 
@@ -377,12 +375,12 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[i
 }
 
 // windowReporter logs the current state of the application to the window-report.txt file.
-// Each line has a timestamp, the current state of the window channel, and an estimate of the pending map.
-// Pending map does not need any sort of control structure which could result in an error of a few transactions during the logging.
-// A semaphore could be implemented but would likely affect performance.
-// Its expected that the window channel will "always" be full and the pending map expecting an equal number of transactions.
-// Any fewer means that either the client can't keep up or, if the number of transactions is too big, that the network or the mempool can't handle the load.
-func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, pendingMap map[int16]bool, txCh chan IdPayload) {
+// Each line has a timestamp, the current state of the window channel, and the current state of the tx channel.
+// Its expected that both channels will "always" be full.
+// Any fewer in the window means that either the client can't keep up
+// or, if the number of transactions is too big, that the network or the mempool can't handle the load.
+// A non-full tx channel means either the generator isn't keeping up or the load_tx_batch_size variable is too small.
+func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload) {
 	// Create log file
 	logger.Info("Starting window report generation")
 	txFilePath := filepath.Join("networks", "logs", "window-log.txt")
@@ -410,9 +408,8 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 		case <-time.After(windowReportTimer):
 			t := time.Now().UTC()
 			chLen := len(windowCh)
-			mapLen := len(pendingMap)
 			txLen := len(txCh)
-			_, err = txWriter.WriteString(fmt.Sprintf("%s - %d out of %d window slots used. %d transactions pending. %d transactions generated out of %d.\n", t, chLen, windowSize, mapLen, txLen, txSize))
+			_, err = txWriter.WriteString(fmt.Sprintf("%s - %d out of %d window slots used. %d transactions generated out of %d.\n", t, chLen, windowSize, txLen, txSize))
 			if err != nil {
 				logger.Info("error writing to window log file", "error", err)
 			}
