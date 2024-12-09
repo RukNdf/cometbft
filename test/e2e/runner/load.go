@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
+	"strings"
+
+	//"encoding/base64"
+	//"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/gorilla/websocket"
-	"strings"
+	//"github.com/gorilla/websocket"
+	//"strings"
 	"sync"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 const workerPoolSize = 16
 
 // TODO add to toml
-var window = 1
+var window = 5
 
 // IdTx is a Tx transaction bundled with its 16 byte identifier.
 // The identifier is used to map the pending transactions to differ new commits from duplicates.
@@ -57,7 +59,8 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	pendingMap := make(map[int16]bool)
 	txCh := make(chan IdTx)
 	go loadGenerate(ctx, txCh, testnet, clientId)
-	go monitorBlocks(ctx, windowCh, pendingMap, clientId)
+	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
+	go monitorBlocks(ctx, windowCh, pendingMap, clientId, createClient(testnet.Nodes[0], useInternalIP))
 
 	for _, n := range testnet.Nodes {
 		if n.SendNoLoad {
@@ -266,144 +269,56 @@ func calculateStatistics(times []int64) (float32, float32, float32, int) {
 	return milliToSeconds(minT), milliToSeconds(sum) / float32(num), milliToSeconds(maxT), num
 }
 
-/* TODO fix query and use the internal WS client
-func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte) {
-	var subscription *rpchttp.WSEvents
-	//query := `{"jsonrpc":"2.0","method":"subscribe","params":["tm.event='NewBlock'"],"id":"1"}`
-	query := "'{ \"jsonrpc\": \"2.0\",\"method\": \"subscribe\",\"id\": 0,\"params\": {\"query\": \"tm.event='\"'NewBlock'\"'\"} }'"
-	s, err := subscription.Subscribe(ctx, "", query, 10)
+func createClient(n *e2e.Node, useInternalIP bool) *rpchttp.HTTP {
+	var client *rpchttp.HTTP
+	var err error
+	if useInternalIP {
+		client, err = n.ClientInternalIP()
+	} else {
+		client, err = n.Client()
+	}
 	if err != nil {
-		logger.Info("error when creating a subscription", "error", err)
-		return
+		logger.Info("error creating subscription client", "error", err)
+		return nil
 	}
-
-	for block := range s {
-		// Time in milliseconds (as int64). More bytes than necessary but it's possibly faster than other methods in this case.
-		//rcvTime := time.Now().UnixMilli()
-		var txs = block.Data
-		logger.Info("load", "msg", log.NewLazySprintf("---- %+v", txs))
-
-
-			//txs := t.Block.data.Txs
-
-			// List of round trip times in this block
-			times := make([]int64, 0, len(txs))
-
-			for _, tx := range txs {
-				tx, err := payload.FromBytes(tx)
-				if err != nil {
-					// Prefix error means it encountered a tx that wasn't submitted by this client and thus can be ignored
-					if !strings.Contains(err.Error(), "key prefix") {
-						logger.Info("error when reading a transaction", "error", err)
-					}
-					continue
-				}
-
-				id := tx.Id
-				// Ignore transactions from other clients
-				if id[0] == clientId {
-					var txNum int16 = (int16(id[1]) << 8) + int16(id[2])
-					// Ignore non-pending transactions (e.g. duplicates)
-					if pendingMap[txNum] {
-						// Deletes the key to save memory.
-						// Simply changing the key's value to false might be faster if this function is too slow.
-						delete(pendingMap, txNum)
-
-						// Free a slot for a new tx.
-						<-windowCh
-
-						t := rcvTime - tx.Time.AsTime().UnixMilli()
-						times = append(times, t)
-					}
-				}
-
-			}
-
-			minT, avgrT, maxT, numT := calculateStatistics(times)
-
-			logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avgrT, maxT, numT, len(txs)))
-
-
+	err = client.Start()
+	if err != nil {
+		logger.Info("error starting subscription client service", "error", err)
+		return nil
 	}
-
-}*/
-
-/*
-*  TODO TEMPORARY
- */
-
-type NewBlockSubscription struct {
-	Jsonrpc string `json:"jsonrpc"`
-	Id      string `json:"id"`
-	Result  struct {
-		Query string `json:"query"`
-		Data  struct {
-			Type  string `json:"type"`
-			Value struct {
-				Block struct {
-					Header struct {
-						Height string `json:"height"`
-						Time   string `json:"time"`
-					} `json:"header"`
-					Data struct {
-						Txs []string `json:"txs"`
-					} `json:"data"`
-				} `json:"block"`
-			} `json:"value"`
-		} `json:"data"`
-	} `json:"result"`
+	return client
 }
 
-func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte) {
-	subscribeRequest := `{"jsonrpc":"2.0","method":"subscribe","params":["tm.event='NewBlock'"],"id":"1"}`
-	c, _, err := websocket.DefaultDialer.Dial("ws://localhost:5701/websocket", nil)
-	if err != nil {
-		logger.Info("error when creating a subscription", "error", err)
-		return
-	}
-	defer c.Close()
-
-	err = c.WriteMessage(websocket.TextMessage, []byte(subscribeRequest))
+// monitorBlocks uses a ws subscription to receive new blocks and verify which transactions have been commited.
+// As new transactions come the pending window gets updated and the latency of the transactions is calculated.
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[int16]bool, clientId byte, client *rpchttp.HTTP) {
+	//Create a subscription channel from the client to receive new blocks
+	query := `tm.event='NewBlock'`
+	s, err := client.Subscribe(ctx, "", query, 10)
 	if err != nil {
 		logger.Info("error when creating a subscription", "error", err)
 		return
 	}
 
 	for {
-		_, message, err := c.ReadMessage()
-		if err != nil {
-			logger.Info("error when creating a subscription", "error", err)
-			return
-		}
-
+		r := <-s
 		// Time in milliseconds (as int64). More bytes than necessary but it's possibly faster than other methods in this case.
 		rcvTime := time.Now().UnixMilli()
 
-		var NewBlock NewBlockSubscription
-		err = json.Unmarshal(message, &NewBlock)
-		if err != nil {
-			logger.Info("error when reading a subscription", "error", err)
+		// Extract block from reply
+		var data = r.Data
+		b, newBlock := data.(types.EventDataNewBlock)
+		if !newBlock {
 			continue
 		}
-
-		numTxs := len(NewBlock.Result.Data.Value.Block.Data.Txs)
-		if numTxs == 0 {
-			continue
-		}
+		txs := b.Block.Txs
 
 		// List of round trip times in this block
-		times := make([]int64, 0, numTxs)
+		times := make([]int64, 0, len(txs))
 
-		for _, txStr := range NewBlock.Result.Data.Value.Block.Data.Txs {
-
-			data, err := base64.StdEncoding.DecodeString(txStr)
-			if err != nil {
-				logger.Info("error when reading a transaction", "error", err)
-				continue
-			}
-
-			tx, err := payload.FromBytes(data)
-
+		// Iterate through each transaction, checking if it was sent from this client and is not duplicated.
+		for _, tx := range txs {
+			tx, err := payload.FromBytes(tx)
 			if err != nil {
 				// Prefix error means it encountered a tx that wasn't submitted by this client and thus can be ignored
 				if !strings.Contains(err.Error(), "key prefix") {
@@ -432,8 +347,10 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap map[i
 
 		}
 
-		minT, avgrT, maxT, numT := calculateStatistics(times)
+		minT, avrgT, maxT, numT := calculateStatistics(times)
 
-		logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avgrT, maxT, numT, numTxs))
+		logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avrgT, maxT, numT, len(txs)))
+
 	}
+
 }
