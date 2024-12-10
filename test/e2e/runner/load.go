@@ -30,6 +30,8 @@ const workerPoolSize = 16
 // TODO add to toml
 var window = 900
 var windowReportTimer = 100 * time.Millisecond
+var monitorClientAttempts = 10
+var monitorClientATime = 250
 
 // IdPayload is a payload object bundled with its 2 byte identifier in int16 form.
 // The identifier is used to map the pending transactions to differ new commits from duplicates.
@@ -74,7 +76,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	defer stopWindowReport(stopReport, windowConfirm)
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
-	go monitorBlocks(ctx, windowCh, pendingMap, clientId, createClient(testnet.Nodes[0], useInternalIP))
+	go monitorBlocks(ctx, windowCh, pendingMap, clientId, testnet.Nodes[0], useInternalIP)
 
 	for _, n := range testnet.Nodes {
 		if n.SendNoLoad {
@@ -302,17 +304,27 @@ func createClient(n *e2e.Node, useInternalIP bool) *rpchttp.HTTP {
 		logger.Info("error creating subscription client", "error", err)
 		return nil
 	}
-	err = client.Start()
-	if err != nil {
-		logger.Info("error starting subscription client service", "error", err)
-		return nil
+	sleepTime := time.Duration(monitorClientATime) * time.Millisecond
+	for i := 0; i < monitorClientAttempts; i++ {
+		err = client.Start()
+		if err != nil {
+			logger.Info("error starting subscription client service", "error", err)
+			if i == monitorClientAttempts-1 {
+				panic(fmt.Sprintf("Max attempts reached when trying to start subscription service: %v", err))
+				return nil
+			}
+			time.Sleep(sleepTime)
+			continue
+		}
+		return client
 	}
-	return client
+	return nil
 }
 
 // monitorBlocks uses a ws subscription to receive new blocks and verify which transactions have been commited.
 // As new transactions come the pending window gets updated and the latency of the transactions is calculated.
-func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync.Map, clientId byte, client *rpchttp.HTTP) {
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync.Map, clientId byte, node *e2e.Node, useInternalIP bool) {
+	client := createClient(node, useInternalIP)
 	//Create a subscription channel from the client to receive new blocks
 	query := `tm.event='NewBlock'`
 	s, err := client.Subscribe(ctx, "", query, 10)
@@ -387,9 +399,16 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync
 // or, if the number of transactions is too big, that the network or the mempool can't handle the load.
 // A non-full tx channel means either the generator isn't keeping up or the load_tx_batch_size variable is too small.
 func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload) {
+	logFolder := filepath.Join("networks", "logs")
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(logFolder, os.ModePerm); err != nil {
+		logger.Error("error creating output directory", "error", err)
+		panic(err)
+	}
+
 	// Create log file
 	logger.Info("Starting window report generation")
-	txFilePath := filepath.Join("networks", "logs", "window-log.txt")
+	txFilePath := filepath.Join(logFolder, "window-log.txt")
 	txFile, err := os.Create(txFilePath)
 	if err != nil {
 		logger.Info("Error creating window log file", "error", err)
@@ -409,7 +428,7 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 		// time.After is necessary as time.Sleep can't be interrupted while it's sleeping.
 		select {
 		case <-stopReport:
-			stopReport <- struct{}{}
+			reportConfirm <- struct{}{}
 			return
 		case <-time.After(windowReportTimer):
 			t := time.Now().UTC()

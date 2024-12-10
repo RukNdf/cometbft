@@ -126,6 +126,9 @@ func NewCLI() *CLI {
 			ctx, loadCancel := context.WithCancel(context.Background())
 			defer loadCancel()
 
+			repCtx, reportCancel := context.WithCancel(context.Background())
+			defer reportCancel()
+
 			go func() {
 				err := Load(ctx, cli.testnet, false)
 				if err != nil {
@@ -138,15 +141,15 @@ func NewCLI() *CLI {
 				return err
 			}
 
-			if err := Wait(cmd.Context(), cli.testnet, 5); err != nil { // allow some txs to go through
-				return err
-			}
-
 			go func() {
-				if err := Report(ctx, cli.testnet, false); err != nil {
+				if err := Report(repCtx, cli.testnet, false); err != nil {
 					chLoadResult <- err
 				}
 			}()
+
+			if err := Wait(cmd.Context(), cli.testnet, 5); err != nil { // allow some txs to go through
+				return err
+			}
 
 			if cli.testnet.HasPerturbations() {
 				if err := Perturb(cmd.Context(), cli.testnet, cli.infp); err != nil {
@@ -177,6 +180,8 @@ func NewCLI() *CLI {
 			if err := Test(cli.testnet, cli.infp.GetInfrastructureData()); err != nil {
 				return err
 			}
+
+			reportCancel()
 			if !cli.preserve {
 				if err := Cleanup(cli.testnet); err != nil {
 					return err

@@ -153,7 +153,11 @@ func generateReport(ctx context.Context, outputDir string, ch <-chan ctypes.Resu
 
 	for {
 		select {
+		case <-ctx.Done():
+			logger.Info("channel closed, stopping report generation", "node", i)
+			return
 		case result, ok := <-ch:
+
 			if !ok {
 				logger.Info("channel closed, stopping report generation", "node", i)
 				return
