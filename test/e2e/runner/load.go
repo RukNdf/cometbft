@@ -370,6 +370,12 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync
 
 		logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avrgT, maxT, numT, len(txs)))
 
+		//Exit when done
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 	}
 
 }
