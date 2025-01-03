@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Report runs test cases under tests.
@@ -97,9 +98,22 @@ func Report(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error
 }
 
 type NewBlock struct {
-	Height string   `json:"height"`
-	Time   string   `json:"time"`
-	Txs    []string `json:"txs"`
+	Height                string   `json:"height"`
+	Time                  string   `json:"time"`
+	Size                  int      `json:"size"`
+	ElapsedSinceLastBlock float64  `json:"elapsedSinceLastBlock"`
+	Round                 int32    `json:"round"`
+	Txs                   []*NewTx `json:"txs"`
+}
+
+type NewTx struct {
+	Connections uint64        `json:"connections"`
+	Rate        uint64        `json:"rate"`
+	Size        uint64        `json:"size"`
+	Id          []byte        `json:"id,omitempty"`
+	Height      string        `json:"height"`
+	Time        time.Time     `json:"time"`
+	Latency     time.Duration `json:"latency"`
 }
 
 func generateReport(ctx context.Context, outputDir string, ch <-chan ctypes.ResultEvent, i int) {
@@ -118,14 +132,27 @@ func generateReport(ctx context.Context, outputDir string, ch <-chan ctypes.Resu
 	txWriter := bufio.NewWriter(txFile)
 	defer txWriter.Flush()
 
+	blkFilePath := filepath.Join(outputDir, fmt.Sprintf("blk-node%d.json", i))
+
+	// Create and buffer the transaction log file
+	//txFile, err := os.OpenFile(blkFilePath, os.O_CREATE|os.O_WRONLY, 0644)
+	blkFile, err := os.Create(blkFilePath)
+	if err != nil {
+		logger.Info("non-fatal error creating blk log file", "node", i, "error", err)
+		return
+	}
+	defer blkFile.Close()
+	blkWriter := bufio.NewWriter(blkFile)
+	defer blkWriter.Flush()
+
 	// Read from the channel and write to the files
 	logger.Info("Waiting for messages at ", "node", i)
+	var lastBlockTimestamp time.Time
+	firstHeight := true
+	var lastCommitRound int32
 
 	for {
 		select {
-		case <-ctx.Done():
-			logger.Info("context finalized, stopping report generation", "node", i)
-			return
 		case result, ok := <-ch:
 			if !ok {
 				logger.Info("channel closed, stopping report generation", "node", i)
@@ -134,7 +161,11 @@ func generateReport(ctx context.Context, outputDir string, ch <-chan ctypes.Resu
 
 			data := result.Data.(types.EventDataNewBlock)
 
-			var txsAsStrings []string
+			var txsAsStrings []*NewTx
+
+			height := strconv.FormatInt(data.Block.Height, 10)
+			ts := time.Now()
+
 			for _, txBytes := range data.Block.Data.Txs {
 				b64 := base64.StdEncoding.EncodeToString(txBytes)
 
@@ -158,25 +189,58 @@ func generateReport(ctx context.Context, outputDir string, ch <-chan ctypes.Resu
 				}
 				//receivedTxs += string(out.Time.AsTime().UTC().Format(time.RFC3339Nano)) + ","
 
-				marshal, err := json.Marshal(out)
-				if err != nil {
-					return
+				p := &NewTx{
+					Connections: out.Connections,
+					Rate:        out.Rate,
+					Size:        out.Size,
+					Time:        out.Time.AsTime(),
+					Id:          out.Id,
+					Height:      height,
+					Latency:     ts.Sub(out.Time.AsTime()),
 				}
-				txsAsStrings = append(txsAsStrings, string(marshal))
+
+				//marshal, err := json.Marshal(p)
+				//if err != nil {
+				//	return
+				//}
+				txsAsStrings = append(txsAsStrings, p)
+			}
+
+			if firstHeight {
+				firstHeight = false
+				lastBlockTimestamp = data.Block.Time
+				lastCommitRound = data.Block.LastCommit.Round
+				continue
 			}
 
 			b := &NewBlock{
-				Height: strconv.FormatInt(data.Block.Height, 10),
+				Height: height,
 				Time:   data.Block.Time.String(),
-				Txs:    txsAsStrings,
+				//Txs:                   txsAsStrings,
+				Size:                  len(txsAsStrings),
+				ElapsedSinceLastBlock: data.Block.Time.Sub(lastBlockTimestamp).Seconds(),
+				Round:                 lastCommitRound,
 			}
 
-			jsonString, err := json.Marshal(b)
+			lastBlockTimestamp = data.Block.Time
+			lastCommitRound = data.Block.LastCommit.Round
+
+			for _, tx := range txsAsStrings {
+				txJson, err := json.Marshal(tx)
+				if err != nil {
+					return
+				}
+				_, err = txWriter.WriteString(fmt.Sprintf(string(txJson) + "\n"))
+				if err != nil {
+					logger.Info("error writing to tx log file", "node", i, "error", err)
+				}
+			}
+
+			blkJson, err := json.Marshal(b)
 			if err != nil {
 				return
 			}
-			// Simulate transaction logging (you can modify this as needed)
-			_, err = txWriter.WriteString(fmt.Sprintf(string(jsonString) + "\n"))
+			_, err = blkWriter.WriteString(fmt.Sprintf(string(blkJson) + "\n"))
 			if err != nil {
 				logger.Info("error writing to tx log file", "node", i, "error", err)
 			}

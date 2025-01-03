@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"io/fs"
 	"math/rand"
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/spf13/cobra"
 
 	"github.com/cometbft/cometbft/libs/log"
 	e2e "github.com/cometbft/cometbft/test/e2e/pkg"
@@ -174,6 +173,7 @@ func NewCLI() *CLI {
 			if err := Wait(cmd.Context(), cli.testnet, 5); err != nil { // wait for network to settle before tests
 				return err
 			}
+			// Wait for all report generation goroutines to finish
 			if err := Test(cli.testnet, cli.infp.GetInfrastructureData()); err != nil {
 				return err
 			}
@@ -243,6 +243,24 @@ func NewCLI() *CLI {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			logger.Info("Stopping testnet")
 			return cli.infp.StopTestnet(context.Background())
+		},
+	})
+
+	cli.root.AddCommand(&cobra.Command{
+		Use:   "report",
+		Short: "Starts the report module",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger.Info("Initiating reporter")
+			return Report(cmd.Context(), cli.testnet, false)
+		},
+	})
+
+	cli.root.AddCommand(&cobra.Command{
+		Use:   "plot",
+		Short: "Plots the result from the report module",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger.Info("Initiating reporter")
+			return Plotter()
 		},
 	})
 
