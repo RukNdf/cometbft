@@ -27,11 +27,9 @@ import (
 
 const workerPoolSize = 16
 
-// TODO add to toml
-var window = 900
-var windowReportTimer = 100 * time.Millisecond
-var monitorClientAttempts = 10
-var monitorClientATime = 250
+// Monitor client connections vars
+const monitorClientAttempts = 10
+const monitorClientATime = 250
 
 // IdPayload is a payload object bundled with its 2 byte identifier in int16 form.
 // The identifier is used to map the pending transactions to differ new commits from duplicates.
@@ -43,6 +41,8 @@ type IdPayload struct {
 // Load generates transactions against the network until the given context is
 // canceled.
 func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
+
+	logger.Info(fmt.Sprintf("Batch %v", testnet.LoadTxBatchSize))
 	initialTimeout := 1 * time.Minute
 	stallTimeout := 30 * time.Second
 	chSuccess := make(chan struct{})
@@ -64,15 +64,15 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	started := time.Now()
 
 	// windowCh is used to limit the number of pending transactions
-	windowCh := make(chan struct{}, window)
+	windowCh := make(chan struct{}, testnet.LoadTxWindowSize)
 	// Map the pending transactions to differentiate new commits from duplicated commits.
 	pendingMap := new(sync.Map)
 	// channel between the tx generator and the client function, with buffer size of 1.5x the window
-	txCh := make(chan IdPayload, int((3*window)/2))
+	txCh := make(chan IdPayload, int((3*testnet.LoadTxWindowSize)/2))
 	// Signals to stop the window report thread.
 	stopReport := make(chan struct{})
 	windowConfirm := make(chan struct{})
-	go windowReporter(stopReport, windowConfirm, windowCh, txCh)
+	go windowReporter(stopReport, windowConfirm, windowCh, txCh, testnet.LoadTxWindowSize, testnet.LoadWindowReportTime)
 	defer stopWindowReport(stopReport, windowConfirm)
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
@@ -83,7 +83,7 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 			continue
 		}
 
-		for w := 0; w < window; w++ {
+		for w := 0; w < testnet.LoadTxConnections; w++ {
 			go loadProcess(ctx, txCh, chSuccess, chFailed, n, useInternalIP, windowCh, pendingMap)
 		}
 	}
@@ -398,7 +398,7 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync
 // Any fewer in the window means that either the client can't keep up
 // or, if the number of transactions is too big, that the network or the mempool can't handle the load.
 // A non-full tx channel means either the generator isn't keeping up or the load_tx_batch_size variable is too small.
-func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload) {
+func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload, windowSize int, windowReportTimer int) {
 	logFolder := filepath.Join("networks", "logs")
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(logFolder, os.ModePerm); err != nil {
@@ -418,10 +418,9 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 	txWriter := bufio.NewWriter(txFile)
 	defer txWriter.Flush()
 
-	// Constants
-	windowSize := window
+	// Constant
 	txSize := cap(txCh)
-
+	reportTimer := time.Duration(windowReportTimer) * time.Millisecond
 	// Periodically pool data and write to log file
 	for {
 		// Wait for the shutdown signal or for the timer to end.
@@ -430,7 +429,7 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 		case <-stopReport:
 			reportConfirm <- struct{}{}
 			return
-		case <-time.After(windowReportTimer):
+		case <-time.After(reportTimer):
 			t := time.Now().UTC()
 			chLen := len(windowCh)
 			txLen := len(txCh)

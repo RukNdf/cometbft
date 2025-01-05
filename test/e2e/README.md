@@ -3,7 +3,8 @@
 - [End-to-End Tests](#end-to-end-tests)
 	- [Fast compilation](#fast-compilation)
 	- [Conceptual Overview](#conceptual-overview)
-	- [Testnet Manifests](#testnet-manifests)
+    - [Testnet Manifests](#testnet-manifests)
+    - [Load Window](#load-window)
 	- [Random Testnet Generation](#random-testnet-generation)
 	- [Test Stages](#test-stages)
 	- [Tests](#tests)
@@ -67,6 +68,16 @@ The tests must take into account the network and/or node configuration, and tole
 ## Testnet Manifests
 
 Testnets are specified as TOML manifests. For an example see [`networks/ci.toml`](networks/ci.toml), and for documentation see [`pkg/manifest.go`](pkg/manifest.go).
+
+## Load Window
+
+This runner version operates with a window that limits the maximum pending transactions.
+
+If load_tx_batch_size (default 2) is less than or equal to the load_tx_window_size load will work as normal, but if the batch size is bigger the window will stop the transactions once the threshold is reached and only allow new broadcasts after one of the pending transactions is commited.
+
+Note that the clients wait for confirmation from the mempool before proceeding. If the network is too slow or the blocks are too fast the window may not be maxed out during execution. In those cases increasing load_tx_connections from its default of 1 may help depending on the test environment.
+
+During execution information about the window and tx generation are collected and written to the /networks/logs subfolder.
 
 ## Random Testnet Generation
 

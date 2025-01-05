@@ -35,6 +35,8 @@ const (
 	defaultConnections = 1
 	defaultTxSizeBytes = 1024
 
+	defaultWindowReportTime = 100
+
 	localVersion = "cometbft/e2e-node:local-version"
 )
 
@@ -168,6 +170,12 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 	}
 	if testnet.LoadTxSizeBytes == 0 {
 		testnet.LoadTxSizeBytes = defaultTxSizeBytes
+	}
+	if testnet.LoadTxWindowSize == 0 {
+		testnet.LoadTxWindowSize = defaultBatchSize
+	}
+	if testnet.LoadWindowReportTime == 0 {
+		testnet.LoadWindowReportTime = defaultWindowReportTime
 	}
 
 	testnet.LatencyEmulationEnabled = true

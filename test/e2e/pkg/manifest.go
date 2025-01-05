@@ -87,6 +87,9 @@ type Manifest struct {
 	LoadTxBatchSize   int `toml:"load_tx_batch_size"`
 	LoadTxConnections int `toml:"load_tx_connections"`
 	LoadMaxTxs        int `toml:"load_max_txs"`
+	LoadTxWindowSize  int `toml:"load_tx_window_size"`
+	//How long the window reporter module waits between reads. Defaults to 100 (milliseconds).
+	LoadWindowReportTime int `toml:"load_window_report_time"`
 
 	// LogLevel specifies the log level to be set on all nodes.
 	LogLevel string `toml:"log_level"`
