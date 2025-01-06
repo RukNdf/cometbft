@@ -427,7 +427,7 @@ func PlotLatencyByLoadPeriod() error {
 
 	// Get borders
 	maxX := 0
-	minX := 0
+	minX := math.MaxInt
 	minY := 0.0 // Y is the time axis. We can leave it as 0 since blocks rarely take more than a few seconds.
 	maxY := 0.0
 
@@ -438,7 +438,8 @@ func PlotLatencyByLoadPeriod() error {
 		//update values
 		if blockSize > maxX {
 			maxX = blockSize
-		} else if blockSize < minX {
+		}
+		if blockSize < minX {
 			minX = blockSize
 		}
 		if lat > maxY {
