@@ -199,7 +199,7 @@ func PlotBlock() error {
 func PlotLatencyDistribution() error {
 	// Suppose the file with latencies is "transactions-latency.json"
 	// or any other. Adjust as needed:
-	latencyFile := filepath.Join("networks", "logs", "txs-node1.json")
+	latencyFile := filepath.Join("networks", "logs", "txs-node0.json")
 	f, err := os.Open(latencyFile)
 	if err != nil {
 		logger.Error("Erro ao abrir arquivo de latência", "err", err)
@@ -308,6 +308,167 @@ func PlotLatencyDistribution() error {
 	return nil
 }
 
+// PlotLatencyByLoadPeriod looks for the largest period with a certain load and calculates the average latency for each period.
+// If the latency is a flat line it shows that the system can deal with the increase in load,
+// if the latency increases that means the system can no longer deal with the load and is taking more and more to process it.
+func PlotLatencyByLoadPeriod() error {
+	// Minimum sequence blocks to include in the graph.
+	// Smaller sequences are disregarded as noise.
+	const blockPeriodThreshold = 3
+
+	// Average latency and the number of items that generated that average
+	type avgLat struct {
+		lat float64
+		num int
+	}
+
+	// Suppose the file with latencies is "transactions-latency.json"
+	// or any other. Adjust as needed:
+	latencyFile := filepath.Join("networks", "logs", "txs-node0.json")
+	f, err := os.Open(latencyFile)
+	if err != nil {
+		logger.Error("Erro ao abrir arquivo de latência", "err", err)
+		return err
+	}
+	defer f.Close()
+
+	// Latencies records the average latency of each block and numTx records the number of transactions in that same block.
+	// It assumes the transactions were written sequentially which is true for the current report module.
+	var latencies []avgLat
+
+	curLatSum := 0.0
+	curNumTx := 0
+	currentHeight := ""
+
+	// Read file and compile data
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var tx NewTx
+		if err := json.Unmarshal([]byte(line), &tx); err != nil {
+			logger.Error("Erro unmarshaling tx latency JSON", "err", err, "line", line)
+			continue
+		}
+
+		// Another block started, record information of the current block and reset counters
+		if tx.Height != currentHeight {
+			if currentHeight != "" {
+				average := curLatSum / float64(curNumTx)
+				latencies = append(latencies, avgLat{average, curNumTx})
+			}
+			currentHeight = tx.Height
+			curLatSum = 0
+			curNumTx = 0
+		}
+
+		// Convert latency from ns to seconds and add to counter
+		curLatSum += float64(tx.Latency) / 1e9
+		curNumTx++
+	}
+	//record last block
+	if currentHeight != "" {
+		average := curLatSum / float64(curNumTx)
+		latencies = append(latencies, avgLat{average, curNumTx})
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Error("Erro lendo arquivo de latência", "err", err)
+	}
+
+	if len(latencies) == 0 {
+		logger.Error("Nenhum dado de latência para plotar.")
+		return nil
+	}
+
+	// Find the longest period for each block size
+	averageLat := make(map[int]avgLat)
+	curBlockSize := 0
+	curPeriodLen := 0
+	curLatSum = 0
+	for _, v := range latencies {
+		n := v.num
+		l := v.lat
+		// Block size changed, write previous to map if it is over the threshold
+		if n != curBlockSize {
+			if curPeriodLen > blockPeriodThreshold {
+				if curPeriodLen > averageLat[curBlockSize].num {
+					average := curLatSum / float64(curPeriodLen)
+					averageLat[curBlockSize] = avgLat{average, curPeriodLen}
+				}
+			}
+			curLatSum = 0
+			curPeriodLen = 0
+			curBlockSize = n
+		}
+		curLatSum += l
+		curPeriodLen++
+	}
+	// Process last block if it went over the threshold as it won't be caught by the loop
+	if curPeriodLen > blockPeriodThreshold {
+		if curPeriodLen > averageLat[curBlockSize].num {
+			average := curLatSum / float64(curPeriodLen)
+			averageLat[curBlockSize] = avgLat{average, curPeriodLen}
+		}
+	}
+
+	if len(averageLat) == 0 {
+		logger.Error("Nenhum período de latência para plotar.")
+		return nil
+	}
+
+	// Build a new plot
+	p := plot.New()
+	p.Title.Text = "Latência média por carga"
+	p.X.Label.Text = "Transações por bloco"
+	p.Y.Label.Text = "Latência (segundos)"
+
+	// Get borders
+	maxX := 0
+	minX := 0
+	minY := 0.0 // Y is the time axis. We can leave it as 0 since blocks rarely take more than a few seconds.
+	maxY := 0.0
+
+	var points plotter.XYs
+	for blockSize := range averageLat {
+		lat := averageLat[blockSize].lat
+		points = append(points, plotter.XY{X: float64(blockSize), Y: lat})
+		//update values
+		if blockSize > maxX {
+			maxX = blockSize
+		} else if blockSize < minX {
+			minX = blockSize
+		}
+		if lat > maxY {
+			maxY = lat
+		}
+	}
+
+	scatter, err := plotter.NewScatter(points)
+	if err != nil {
+		logger.Error("Erro criando scatter de latência por período", "err", err)
+		return err
+	}
+	p.Add(scatter)
+
+	p.X.Max = float64(maxX)
+	p.X.Min = float64(minX)
+	p.Y.Max = maxY
+	p.Y.Min = minY
+
+	// Save
+	outName := "latency_period_scatter.png"
+	if err := p.Save(8*vg.Inch, 4*vg.Inch, outName); err != nil {
+		logger.Error("Erro ao salvar scatter de latência por período", "err", err)
+	} else {
+		fmt.Printf("Scatter de latência por período gerado em %s\n", outName)
+	}
+
+	return nil
+}
+
 // The main function now calls both the existing Plotter and the new PlotLatencyDistribution
 func Plotter() error {
 	if err := PlotBlock(); err != nil {
@@ -315,6 +476,10 @@ func Plotter() error {
 		return err
 	}
 	if err := PlotLatencyDistribution(); err != nil {
+		logger.Error("err", err)
+		return err
+	}
+	if err := PlotLatencyByLoadPeriod(); err != nil {
 		logger.Error("err", err)
 		return err
 	}
