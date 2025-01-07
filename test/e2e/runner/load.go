@@ -72,11 +72,13 @@ func Load(ctx context.Context, testnet *e2e.Testnet, useInternalIP bool) error {
 	// Signals to stop the window report thread.
 	stopReport := make(chan struct{})
 	windowConfirm := make(chan struct{})
-	go windowReporter(stopReport, windowConfirm, windowCh, txCh, testnet.LoadTxWindowSize, testnet.LoadWindowReportTime)
+	// Reports the number of new transactions in a block to calculate how many are still pending
+	newTxCh := make(chan int)
+	go windowReporter(stopReport, windowConfirm, windowCh, txCh, testnet.LoadTxWindowSize, testnet.LoadWindowReportTime, newTxCh)
 	defer stopWindowReport(stopReport, windowConfirm)
 	go loadGenerate(ctx, txCh, testnet, clientId)
 	// monitorBlocks is currently hardcoded to attach to the first node. Maybe changing it to a toml variable would be better.
-	go monitorBlocks(ctx, windowCh, pendingMap, clientId, testnet.Nodes[0], useInternalIP)
+	go monitorBlocks(ctx, windowCh, pendingMap, clientId, testnet.Nodes[0], useInternalIP, newTxCh)
 
 	for _, n := range testnet.Nodes {
 		if n.SendNoLoad {
@@ -323,7 +325,7 @@ func createClient(n *e2e.Node, useInternalIP bool) *rpchttp.HTTP {
 
 // monitorBlocks uses a ws subscription to receive new blocks and verify which transactions have been commited.
 // As new transactions come the pending window gets updated and the latency of the transactions is calculated.
-func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync.Map, clientId byte, node *e2e.Node, useInternalIP bool) {
+func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync.Map, clientId byte, node *e2e.Node, useInternalIP bool, newTxCh chan int) {
 	client := createClient(node, useInternalIP)
 	//Create a subscription channel from the client to receive new blocks
 	query := `tm.event='NewBlock'`
@@ -379,7 +381,7 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync
 		}
 
 		minT, avrgT, maxT, numT := calculateStatistics(times)
-
+		newTxCh <- numT
 		logger.Info("load", "msg", log.NewLazySprintf("Block received: min latency %fs avrg latency %fs max latency %fs | %d new txs out of %d", minT, avrgT, maxT, numT, len(txs)))
 
 		//Exit when done
@@ -398,7 +400,7 @@ func monitorBlocks(ctx context.Context, windowCh chan struct{}, pendingMap *sync
 // Any fewer in the window means that either the client can't keep up
 // or, if the number of transactions is too big, that the network or the mempool can't handle the load.
 // A non-full tx channel means either the generator isn't keeping up or the load_tx_batch_size variable is too small.
-func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload, windowSize int, windowReportTimer int) {
+func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windowCh chan struct{}, txCh chan IdPayload, windowSize int, windowReportTimer int, newTxCh chan int) {
 	logFolder := filepath.Join("networks", "logs")
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(logFolder, os.ModePerm); err != nil {
@@ -421,6 +423,13 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 	// Constant
 	txSize := cap(txCh)
 	reportTimer := time.Duration(windowReportTimer) * time.Millisecond
+
+	// Keep track of pending transactions
+	pending := 0
+	// Count how many times there were multiple transactions pending, indicating a possible timeout
+	pendingCount := 0
+	const timeoutPending = 15
+
 	// Periodically pool data and write to log file
 	for {
 		// Wait for the shutdown signal or for the timer to end.
@@ -429,11 +438,30 @@ func windowReporter(stopReport chan struct{}, reportConfirm chan struct{}, windo
 		case <-stopReport:
 			reportConfirm <- struct{}{}
 			return
+		case newTx := <-newTxCh:
+			t := time.Now().UTC()
+			pending -= newTx
+			if pending < 0 {
+				pending = 0
+			}
+			_, err = txWriter.WriteString(fmt.Sprintf("%s - monitor received %d new transactions. %d still pending.\n", t, newTx, pending))
+			if err != nil {
+				logger.Info("error writing to window log file", "error", err)
+			}
+			if pending > 0 {
+				pendingCount++
+				if pendingCount > timeoutPending {
+					_, err = txWriter.WriteString(fmt.Sprintf("WARNING multiple transactions pending for %d blocks, some transactions may have timed out.", pendingCount))
+					if err != nil {
+						logger.Info("error writing to window log file", "error", err)
+					}
+				}
+			}
 		case <-time.After(reportTimer):
 			t := time.Now().UTC()
-			chLen := len(windowCh)
+			pending = len(windowCh)
 			txLen := len(txCh)
-			_, err = txWriter.WriteString(fmt.Sprintf("%s - %d out of %d window slots used. %d transactions generated out of %d.\n", t, chLen, windowSize, txLen, txSize))
+			_, err = txWriter.WriteString(fmt.Sprintf("%s - %d out of %d window slots used. %d transactions generated out of %d.\n", t, pending, windowSize, txLen, txSize))
 			if err != nil {
 				logger.Info("error writing to window log file", "error", err)
 			}
