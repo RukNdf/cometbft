@@ -1,0 +1,4 @@
+load_tx_window_size = 4000
+load_tx_batch_size = 15000
+load_tx_connections = %VAR%
+[node.validator]
