@@ -15,6 +15,30 @@ import (
 	"time"
 )
 
+// spaceAxis adds a space of up to graphSpacer units to the end of the graph.
+// This is necessary as the plotter library doesn't handle fractional maxs well.
+// If the space to the next integer value is less than graphSpacer units it returns that integer,
+// otherwise it just adds a bit of space to the of the graph.
+func spaceAxis(maxValue float64) float64 {
+	// Space to add to the end of graphs that don't end in round numbers
+	graphSpacer := 0.1
+
+	truncated := math.Trunc(maxValue)
+	// maxValue is already a whole number
+	if truncated == maxValue {
+		return maxValue
+	}
+
+	spaced := maxValue + graphSpacer
+	ts := math.Trunc(spaced)
+	// spacer isn't enough to reach a whole number, return max+spacer
+	if ts == truncated {
+		return spaced
+	}
+	// next whole number reached, return truncated max+spacer
+	return ts
+}
+
 func PlotBlock() error {
 	// Abra o arquivo (substituir "blocks.json" pelo seu arquivo)
 	outputDir := filepath.Join("networks", "logs")
@@ -111,6 +135,9 @@ func PlotBlock() error {
 		}
 	}
 
+	// Fix fractional axis
+	pLine.X.Max = spaceAxis(pLine.X.Max)
+
 	if err := pLine.Save(8*vg.Inch, 4*vg.Inch, "transacoes_line.png"); err != nil {
 		logger.Error("Erro ao salvar transacoes_line.png", "err", err)
 	} else {
@@ -127,7 +154,6 @@ func PlotBlock() error {
 	pHist.Title.Text = "Histograma Txs por Bloco (>0) + CDF"
 	pHist.X.Label.Text = "Txs por Bloco"
 	pHist.Y.Label.Text = "Frequência (Hist) / Contagem (CDF)"
-	pHist.X.Min = 0
 	pHist.Y.Min = 0
 
 	// 1) Hist bins of width=25
@@ -171,19 +197,26 @@ func PlotBlock() error {
 	// optionally set color, style, etc.
 	// cdfLine.Color = color.RGBA{G: 255, A: 255}
 
+	_ = cdfLine
 	pHist.Add(cdfLine)
 	maxCount := 0.0
 	for _, bin := range hist.Bins {
-		if bin.Max > maxCount {
-			maxCount = bin.Max
+		if bin.Weight > maxCount {
+			maxCount = bin.Weight
 		}
 	}
+
 	// Ajustamos o eixo Y para exibir ou o count máximo ou n (se quiser sobrepor uma CDF que chega até n)
 	pHist.Y.Max = math.Max(maxCount, n)
 	// Ajustar pHist.Y.Max para ver todo o cdf
 	// O CDF chega a n (qtd total). O hist max é hist.Data().MaxCount
 	maxY := math.Max(maxCount, n)
 	pHist.Y.Max = maxY
+
+	// Fix fractional axis
+	pHist.X.Max = spaceAxis(pHist.X.Max)
+	// Truncate the minimum transaction value
+	pHist.X.Min = math.Trunc(pHist.X.Min)
 
 	// Salvar
 	if err := pHist.Save(8*vg.Inch, 4*vg.Inch, "transacoes_hist_cdf.png"); err != nil {
@@ -296,6 +329,8 @@ func PlotLatencyDistribution() error {
 	}
 	// Eixo Y precisa acomodar o hist e a CDF (que pode chegar a n)
 	p.Y.Max = math.Max(histMax, n)
+	// Fix fractional axis
+	p.X.Max = spaceAxis(p.X.Max)
 
 	// Save
 	outName := "latency_hist_cdf.png"
