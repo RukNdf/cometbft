@@ -83,11 +83,12 @@ type Manifest struct {
 	// Currently only uncoordinated upgrade is supported
 	UpgradeVersion string `toml:"upgrade_version"`
 
-	LoadTxSizeBytes   int `toml:"load_tx_size_bytes"`
-	LoadTxBatchSize   int `toml:"load_tx_batch_size"`
-	LoadTxConnections int `toml:"load_tx_connections"`
-	LoadMaxTxs        int `toml:"load_max_txs"`
-	LoadTxWindowSize  int `toml:"load_tx_window_size"`
+	LoadTxSizeBytes   int   `toml:"load_tx_size_bytes"`
+	LoadTxBatchSize   int   `toml:"load_tx_batch_size"`
+	LoadTxConnections int   `toml:"load_tx_connections"`
+	LoadMaxTxs        int   `toml:"load_max_txs"`
+	LoadTxWaitBlocks  int64 `toml:"load_tx_wait_blocks"`
+	LoadTxWindowSize  int   `toml:"load_tx_window_size"`
 	//How long the window reporter module waits between reads. Defaults to 100 (milliseconds).
 	LoadWindowReportTime int `toml:"load_window_report_time"`
 

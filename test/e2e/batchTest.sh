@@ -28,6 +28,7 @@ for var in "$@"; do
 	# Clear previous logs and move logs and graphs to experiment folder
 	echo Moving results...
 	echo -----------------------------------
+	rm -rf "$logsFolder/$var"
 	mkdir -p "$logsFolder/$var/"
 	mv networks/logs "$logsFolder/$var/"
 	mv *.png "$logsFolder/$var/"

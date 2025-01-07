@@ -147,7 +147,7 @@ func NewCLI() *CLI {
 				}
 			}()
 
-			if err := Wait(cmd.Context(), cli.testnet, 5); err != nil { // allow some txs to go through
+			if err := Wait(cmd.Context(), cli.testnet, cli.testnet.LoadTxWaitBlocks); err != nil { // allow some txs to go through
 				return err
 			}
 

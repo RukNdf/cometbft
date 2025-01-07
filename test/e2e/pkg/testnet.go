@@ -37,6 +37,8 @@ const (
 
 	defaultWindowReportTime = 100
 
+	defaultWaitBlocks = 5
+
 	localVersion = "cometbft/e2e-node:local-version"
 )
 
@@ -176,6 +178,9 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 	}
 	if testnet.LoadWindowReportTime == 0 {
 		testnet.LoadWindowReportTime = defaultWindowReportTime
+	}
+	if testnet.LoadTxWaitBlocks == 0 {
+		testnet.LoadTxWaitBlocks = defaultWaitBlocks
 	}
 
 	testnet.LatencyEmulationEnabled = true
